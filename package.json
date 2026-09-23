@@ -1,0 +1,29 @@
+{
+  "name": "repo-assistant",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Chintada-Ajay-96/repo-ai-assistant.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Chintada-Ajay-96/repo-ai-assistant/issues"
+  },
+  "homepage": "https://github.com/Chintada-Ajay-96/repo-ai-assistant#readme",
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "^0.24.6"
+  }
+}
