@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts",
+    "embed": "tsx src/index.ts --embed",
     "test": "tsx --test tests/**/*.test.ts"
   },
   "repository": {
@@ -25,6 +26,7 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
+    "openai": "^7.30.0",
     "tree-sitter-wasms": "^0.1.13",
     "web-tree-sitter": "^0.24.6"
   }
