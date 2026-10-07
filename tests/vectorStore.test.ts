@@ -284,12 +284,8 @@ describe("vectorStore - Vector Storage & Semantic Search (Phase 2C)", () => {
 
         // Mock client returns [1, 0, 0] for query "authentication login"
         const mockClient: EmbeddingClient = {
-          embeddings: {
-            create: async (params) => {
-              return {
-                data: [{ embedding: [1, 0, 0], index: 0 }],
-              };
-            },
+          embedTexts: async (inputs: string[]) => {
+            return inputs.map(() => [1, 0, 0]);
           },
         };
 

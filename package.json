@@ -31,7 +31,6 @@
   },
   "dependencies": {
     "@google/genai": "^2.27.0",
-    "openai": "^7.30.0",
     "tree-sitter-wasms": "^0.1.13",
     "web-tree-sitter": "^0.24.6"
   }

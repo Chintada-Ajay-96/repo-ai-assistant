@@ -1,6 +1,6 @@
 # Repository AI Assistant
 
-A lightweight, reliable repository analysis, code chunking, vector indexing, and semantic search engine inspired by Cursor/Copilot-style systems. It indexes source code using WebAssembly-based Tree-sitter grammars, produces semantic code chunks, generates high-dimensional embeddings, and provides persistent vector search using cosine similarity.
+A lightweight, reliable repository analysis, code chunking, vector indexing, semantic search, and RAG question answering engine inspired by Cursor/Copilot-style systems. It indexes source code using WebAssembly-based Tree-sitter grammars, produces semantic code chunks, generates high-dimensional embeddings with Google Gemini, and provides persistent vector search and grounded LLM answer generation.
 
 ---
 
@@ -15,8 +15,8 @@ Phase 2A:
 Symbols → Code Chunks
        │
        ▼
-Phase 2B:
-Code Chunks → Embeddings
+Phase 2B-G:
+Code Chunks → Gemini Embeddings (text-embedding-004)
        │
        ▼
 Phase 2C:
@@ -48,7 +48,11 @@ src/repoMap.ts         ──► Tree-sitter AST parsing & symbol extraction
 src/codeChunks.ts      ──► Semantic code chunking with line preservation
        │
        ▼
-src/embeddings.ts      ──► OpenAI embedding generation (text-embedding-3-small)
+src/embeddings.ts      ──► Gemini embedding generation (text-embedding-004)
+       │                   ├── Provider-independent EmbeddingClient interface
+       │                   ├── Official Google Gen AI SDK (@google/genai)
+       │                   ├── Configurable batching & ordering preservation
+       │                   └── Query embedding in unified vector space
        │
        ▼
 src/vectorStore.ts     ──► Local JSON Vector Store (.data/vector-store.json)
@@ -80,6 +84,27 @@ src/answer.ts          ──► RAG Answer Generation Orchestrator (Phase 3B)
 
 ---
 
+## Unified Gemini Provider Architecture (Phase 2B-G)
+
+The project uses **Google Gemini** as the single unified provider for all AI capabilities:
+1. **Code Embeddings:** Generated using Gemini's official `text-embedding-004` model.
+2. **Query Embeddings:** Generated using the same Gemini `text-embedding-004` model to guarantee identical embedding space alignment.
+3. **Text Generation:** Generated using Gemini Flash (`gemini-2.5-flash`).
+
+### API Key Requirement
+The application requires only a single environment variable:
+```bash
+GEMINI_API_KEY="your-gemini-api-key"
+```
+There is **no** dependency on OpenAI or `OPENAI_API_KEY`.
+
+### Vector Store Migration Note
+Because the embedding provider and model changed to Gemini (`text-embedding-004`):
+- Any previous vector stores generated with other models are considered **stale** and incompatible.
+- Running `npm run index` will cleanly overwrite and rebuild `.data/vector-store.json` using Gemini embeddings.
+
+---
+
 ## Phase 2C: Vector Storage & Semantic Search
 
 ### What is a Vector Store?
@@ -96,16 +121,14 @@ $$\text{similarity}(A, B) = \frac{A \cdot B}{\|A\| \times \|B\|} = \frac{\sum A_
 
 ### How Indexing Works (`npm run index`)
 1. Analyzes the target codebase and creates semantic code chunks.
-2. Batches chunks and calls the embedding API to produce 1,536-dimensional vectors.
+2. Batches chunks and calls the Gemini embedding API (`text-embedding-004`) to produce embedding vectors.
 3. Associates each chunk with its vector and writes the index to `.data/vector-store.json`.
 
 ### How Semantic Search Works (`npm run search`)
 1. Loads the stored vectors from `.data/vector-store.json`.
-2. Generates an embedding for the user's natural-language query using OpenAI API.
+2. Generates an embedding for the user's natural-language query using Gemini API.
 3. Computes the cosine similarity between the query vector and every stored code chunk vector.
 4. Ranks the chunks from highest similarity to lowest and returns the Top-K results.
-
-> **Note:** Generative AI responses, RAG prompts, LLM chat, and automated code editing are **not** part of Phase 2C and will be introduced in subsequent phases.
 
 ---
 
@@ -119,10 +142,7 @@ $$\text{similarity}(A, B) = \frac{A \cdot B}{\|A\| \times \|B\|} = \frac{\sum A_
 - **Retrieval & Context Preparation (Phase 2D)** is an orchestration layer built on top of search. It validates queries, generates query embeddings, queries the vector store, removes duplicate chunks using stable chunk IDs, enforces strict token/character budgets, and formats the retrieved chunks into clean, structured prompt context for an eventual LLM.
 
 ### Why We Build Context
-Large Language Models have finite context windows, incur higher latency and token costs with large inputs, and can become confused by irrelevant noise. We build a structured context so that a downstream LLM receives only the high-signal, relevant code snippets junto with critical metadata (file path, symbol name, symbol type, parent class, line range, similarity score, and code).
-
-### Why the LLM is Not Involved Yet
-In professional RAG systems, **retrieval quality determines generation quality** ("garbage in, garbage out"). By isolating Phase 2D, we verify and test that chunk retrieval, ranking, deduplication, and character budgeting work with 100% determinism before introducing non-deterministic LLM API calls or chat interfaces.
+Large Language Models have finite context windows, incur higher latency and token costs with large inputs, and can become confused by irrelevant noise. We build a structured context so that a downstream LLM receives only the high-signal, relevant code snippets together with critical metadata (file path, symbol name, symbol type, parent class, line range, similarity score, and code).
 
 ### How Top-K Works
 The `topK` parameter (default `5`) defines how many top-ranking semantic neighbors to retrieve from the vector index. Chunks are sorted descending by their cosine similarity score, and only the top `K` chunks are considered for the final context.
@@ -141,23 +161,22 @@ The `maxCharacters` parameter (default `12000`) sets a hard ceiling on the lengt
 ### Overview
 Phase 3A introduces a clean, provider-independent LLM client abstraction ([`src/llm.ts`](src/llm.ts)) for generating natural-language text responses:
 
-- **LLM Provider:** Google Gemini is used as the LLM provider via the official `@google/genai` JavaScript SDK.
+- **LLM Provider:** Google Gemini is used as the LLM provider via the official `@google/genai` SDK.
 - **Model:** Defaults to `gemini-2.5-flash` (configurable through client options).
 - **Environment Configuration:** Requires `GEMINI_API_KEY` to be set in the environment or `.env` file for actual generation.
 - **Mocking & Testing:** Unit tests use dependency injection mocks to verify prompt passing, model configuration, error handling, and empty response safety without making network calls or requiring an API key.
-- **Scope Boundary:** This phase provides only the LLM client abstraction. Full end-to-end RAG answer generation (`npm run ask`), prompt assembly, and answer synthesis will be introduced in subsequent phases.
 
 ---
 
 ## Phase 3B: Grounded RAG Answer Generation
 
 ### Overview
-Phase 3B connects the entire pipeline into the project's **first complete end-to-end Retrieval-Augmented Generation (RAG) system** ([`src/answer.ts`](src/answer.ts)):
+Phase 3B connects the entire pipeline into the project's **complete end-to-end Retrieval-Augmented Generation (RAG) system** ([`src/answer.ts`](src/answer.ts)):
 
 ```text
 User Question
       ↓
-Query Embedding (Phase 2B)
+Query Embedding (Phase 2B-G, Gemini)
       ↓
 Vector Search (Phase 2C)
       ↓
@@ -167,7 +186,7 @@ Context Builder (Phase 2D)
       ↓
 Prompt Construction (Phase 3B)
       ↓
-Gemini LLM (Phase 3A)
+Gemini LLM (Phase 3A, gemini-2.5-flash)
       ↓
 Grounded Answer
 ```
@@ -181,6 +200,20 @@ Grounded Answer
 ---
 
 ## Data Structures
+
+### EmbeddingClient & GeminiEmbeddingClient (Phase 2B-G)
+```ts
+export interface EmbeddingClient {
+  embedTexts(inputs: string[]): Promise<number[][]>;
+}
+
+export interface GenerateEmbeddingsOptions {
+  apiKey?: string;
+  model?: string;
+  batchSize?: number;
+  client?: EmbeddingClient;
+}
+```
 
 ### VectorRecord & SearchResult (Phase 2C)
 ```ts
@@ -254,7 +287,7 @@ export interface RetrieveAndAnswerOptions {
 npm start
 ```
 
-### 2. View Embedding Pipeline (Phase 2B)
+### 2. View Embedding Pipeline (Phase 2B-G)
 ```bash
 npm run embed
 ```

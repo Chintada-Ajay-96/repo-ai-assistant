@@ -47,15 +47,8 @@ describe("retrieval - Retrieval & RAG Context Preparation (Phase 2D)", () => {
 
   function createMockEmbeddingClient(vector: number[]): EmbeddingClient {
     return {
-      embeddings: {
-        async create(params: { model: string; input: string[] }) {
-          return {
-            data: params.input.map((_, i) => ({
-              embedding: vector,
-              index: i,
-            })),
-          };
-        },
+      async embedTexts(inputs: string[]) {
+        return inputs.map(() => vector);
       },
     };
   }
@@ -146,8 +139,8 @@ describe("retrieval - Retrieval & RAG Context Preparation (Phase 2D)", () => {
     });
 
     it("should fail clearly when API key is missing and no client is provided", async () => {
-      const originalApiKey = process.env.OPENAI_API_KEY;
-      delete process.env.OPENAI_API_KEY;
+      const originalApiKey = process.env.GEMINI_API_KEY;
+      delete process.env.GEMINI_API_KEY;
       const store = setupTestStore();
 
       try {
@@ -155,11 +148,11 @@ describe("retrieval - Retrieval & RAG Context Preparation (Phase 2D)", () => {
           async () => {
             await retrieveRelevantCode("query", { store });
           },
-          /Missing OpenAI API key/
+          /Missing Gemini API key/
         );
       } finally {
         if (originalApiKey !== undefined) {
-          process.env.OPENAI_API_KEY = originalApiKey;
+          process.env.GEMINI_API_KEY = originalApiKey;
         }
       }
     });
@@ -167,10 +160,8 @@ describe("retrieval - Retrieval & RAG Context Preparation (Phase 2D)", () => {
     it("should propagate embedding provider errors clearly", async () => {
       const store = setupTestStore();
       const failingClient: EmbeddingClient = {
-        embeddings: {
-          async create() {
-            throw new Error("Provider rate limit exceeded");
-          },
+        async embedTexts() {
+          throw new Error("Provider rate limit exceeded");
         },
       };
 

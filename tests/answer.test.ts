@@ -43,15 +43,8 @@ describe("answer - Complete RAG Answer Generation (Phase 3B)", () => {
 
   function createMockEmbeddingClient(vector: number[]): EmbeddingClient {
     return {
-      embeddings: {
-        async create(params: { model: string; input: string[] }) {
-          return {
-            data: params.input.map((_, i) => ({
-              embedding: vector,
-              index: i,
-            })),
-          };
-        },
+      async embedTexts(inputs: string[]) {
+        return inputs.map(() => vector);
       },
     };
   }
@@ -201,10 +194,8 @@ describe("answer - Complete RAG Answer Generation (Phase 3B)", () => {
       // Embedding client failure
       const store = setupTestStore();
       const failingEmbeddingClient: EmbeddingClient = {
-        embeddings: {
-          async create() {
-            throw new Error("Provider rate limit reached");
-          },
+        async embedTexts() {
+          throw new Error("Provider rate limit reached");
         },
       };
 

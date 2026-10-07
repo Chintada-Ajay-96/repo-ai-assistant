@@ -1,33 +1,152 @@
-import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 import { type CodeChunk } from "./codeChunks.js";
 
-export const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
+// Load environment variables from .env if present
+try {
+  process.loadEnvFile();
+} catch {
+  // Ignore if .env does not exist
+}
+
+/**
+ * Official default Gemini embedding model.
+ */
+export const DEFAULT_EMBEDDING_MODEL = "text-embedding-004";
+
+/**
+ * Default batch size for grouping chunks into embedding requests.
+ */
 export const DEFAULT_BATCH_SIZE = 20;
 
+/**
+ * A CodeChunk paired with its embedding vector.
+ */
 export interface EmbeddedCodeChunk {
   chunk: CodeChunk;
   embedding: number[];
 }
 
+/**
+ * Provider-agnostic interface for generating text embeddings.
+ * Can be mocked in tests or implemented for different embedding providers.
+ */
 export interface EmbeddingClient {
-  embeddings: {
-    create(params: {
+  embedTexts(inputs: string[]): Promise<number[][]>;
+}
+
+/**
+ * Minimal structural interface for the @google/genai SDK models client.
+ * Allows dependency injection of mock SDK clients in unit tests.
+ */
+export interface GeminiEmbeddingSdkClient {
+  models: {
+    embedContent(params: {
       model: string;
-      input: string[];
+      contents: string[];
     }): Promise<{
-      data: Array<{
-        embedding: number[];
-        index?: number;
-      }>;
+      embeddings?: Array<{
+        values?: number[] | undefined;
+      }> | undefined;
     }>;
   };
 }
 
+/**
+ * Options for configuring GeminiEmbeddingClient.
+ */
+export interface GeminiEmbeddingClientOptions {
+  apiKey?: string | undefined;
+  model?: string | undefined;
+  sdkClient?: GeminiEmbeddingSdkClient | undefined;
+}
+
+/**
+ * Concrete Gemini implementation of the EmbeddingClient interface using @google/genai.
+ */
+export class GeminiEmbeddingClient implements EmbeddingClient {
+  private readonly model: string;
+  private readonly client: GeminiEmbeddingSdkClient;
+
+  constructor(options?: GeminiEmbeddingClientOptions) {
+    this.model = options?.model && options.model.trim() !== ""
+      ? options.model.trim()
+      : DEFAULT_EMBEDDING_MODEL;
+
+    if (options?.sdkClient) {
+      this.client = options.sdkClient;
+    } else {
+      const apiKey = options?.apiKey ?? process.env.GEMINI_API_KEY;
+      if (!apiKey || apiKey.trim() === "") {
+        throw new Error(
+          "Missing Gemini API key. Please set the GEMINI_API_KEY environment variable."
+        );
+      }
+      this.client = new GoogleGenAI({ apiKey: apiKey.trim() });
+    }
+  }
+
+  /**
+   * Returns the configured Gemini embedding model name.
+   */
+  getModel(): string {
+    return this.model;
+  }
+
+  /**
+   * Embeds an array of text inputs using Gemini's embedContent API.
+   */
+  async embedTexts(inputs: string[]): Promise<number[][]> {
+    if (inputs.length === 0) {
+      return [];
+    }
+
+    let response;
+    try {
+      response = await this.client.models.embedContent({
+        model: this.model,
+        contents: inputs,
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to generate embeddings from provider: ${message}`);
+    }
+
+    if (!response || !Array.isArray(response.embeddings)) {
+      throw new Error("Invalid embedding response: missing or malformed 'embeddings' array.");
+    }
+
+    if (response.embeddings.length !== inputs.length) {
+      throw new Error(
+        `Invalid embedding response: expected ${inputs.length} embeddings, received ${response.embeddings.length}.`
+      );
+    }
+
+    return response.embeddings.map((item, index) => {
+      if (!item || !Array.isArray(item.values) || item.values.length === 0) {
+        throw new Error(`Invalid embedding vector at index ${index}.`);
+      }
+      return item.values;
+    });
+  }
+}
+
+/**
+ * Factory helper function to instantiate a GeminiEmbeddingClient.
+ */
+export function createGeminiEmbeddingClient(
+  options?: GeminiEmbeddingClientOptions
+): GeminiEmbeddingClient {
+  return new GeminiEmbeddingClient(options);
+}
+
+/**
+ * Options for generating embeddings.
+ */
 export interface GenerateEmbeddingsOptions {
-  apiKey?: string;
-  model?: string;
-  batchSize?: number;
-  client?: EmbeddingClient;
+  apiKey?: string | undefined;
+  model?: string | undefined;
+  batchSize?: number | undefined;
+  client?: EmbeddingClient | undefined;
 }
 
 /**
@@ -68,7 +187,7 @@ export function chunkArray<T>(items: T[], size: number): T[][] {
 
 /**
  * Generates embedding vectors for an array of CodeChunks.
- * Batches requests to the embedding API and attaches vectors to each chunk.
+ * Batches requests to the embedding client and attaches vectors to each chunk.
  */
 export async function generateEmbeddings(
   chunks: CodeChunk[],
@@ -88,13 +207,10 @@ export async function generateEmbeddings(
 
   let client = options?.client;
   if (!client) {
-    const apiKey = options?.apiKey ?? process.env.OPENAI_API_KEY;
-    if (!apiKey || apiKey.trim() === "") {
-      throw new Error(
-        "Missing OpenAI API key. Please set the OPENAI_API_KEY environment variable."
-      );
-    }
-    client = new OpenAI({ apiKey });
+    client = new GeminiEmbeddingClient({
+      apiKey: options?.apiKey,
+      model,
+    });
   }
 
   const batches = chunkArray(chunks, batchSize);
@@ -103,40 +219,35 @@ export async function generateEmbeddings(
   for (const batch of batches) {
     const inputs = batch.map(formatChunkForEmbedding);
 
-    let response;
+    let vectors: number[][];
     try {
-      response = await client.embeddings.create({
-        model,
-        input: inputs,
-      });
+      vectors = await client.embedTexts(inputs);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
+      if (
+        message.startsWith("Failed to generate embeddings from provider") ||
+        message.startsWith("Invalid embedding")
+      ) {
+        throw err;
+      }
       throw new Error(`Failed to generate embeddings from provider: ${message}`);
     }
 
-    if (!response || !Array.isArray(response.data)) {
-      throw new Error("Invalid embedding response: missing or malformed 'data' array.");
+    if (!Array.isArray(vectors)) {
+      throw new Error("Invalid embedding response: expected array of embedding vectors.");
     }
 
-    if (response.data.length !== batch.length) {
+    if (vectors.length !== batch.length) {
       throw new Error(
-        `Invalid embedding response: expected ${batch.length} embeddings, received ${response.data.length}.`
+        `Invalid embedding response: expected ${batch.length} embeddings, received ${vectors.length}.`
       );
     }
 
-    // Sort by index if provided by the API to ensure 100% order alignment
-    const sortedData = [...response.data].sort((a, b) => {
-      if (a.index !== undefined && b.index !== undefined) {
-        return a.index - b.index;
-      }
-      return 0;
-    });
-
     for (let i = 0; i < batch.length; i++) {
       const chunk = batch[i]!;
-      const item = sortedData[i];
+      const vector = vectors[i];
 
-      if (!item || !Array.isArray(item.embedding) || item.embedding.length === 0) {
+      if (!vector || !Array.isArray(vector) || vector.length === 0) {
         throw new Error(
           `Invalid embedding vector for symbol '${chunk.symbol}' in file '${chunk.file}'.`
         );
@@ -144,7 +255,7 @@ export async function generateEmbeddings(
 
       embeddedChunks.push({
         chunk,
-        embedding: item.embedding,
+        embedding: vector,
       });
     }
   }
@@ -154,7 +265,7 @@ export async function generateEmbeddings(
 
 /**
  * Generates an embedding vector for a single query string.
- * Reuses the existing OpenAI embedding client and configuration.
+ * Uses the same embedding client and model as repository indexing.
  */
 export async function generateQueryEmbedding(
   query: string,
@@ -168,30 +279,30 @@ export async function generateQueryEmbedding(
 
   let client = options?.client;
   if (!client) {
-    const apiKey = options?.apiKey ?? process.env.OPENAI_API_KEY;
-    if (!apiKey || apiKey.trim() === "") {
-      throw new Error(
-        "Missing OpenAI API key. Please set the OPENAI_API_KEY environment variable."
-      );
-    }
-    client = new OpenAI({ apiKey });
+    client = new GeminiEmbeddingClient({
+      apiKey: options?.apiKey,
+      model,
+    });
   }
 
-  let response;
+  let vectors: number[][];
   try {
-    response = await client.embeddings.create({
-      model,
-      input: [query.trim()],
-    });
+    vectors = await client.embedTexts([query.trim()]);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
+    if (
+      message.startsWith("Failed to generate embeddings from provider") ||
+      message.startsWith("Invalid embedding")
+    ) {
+      throw err;
+    }
     throw new Error(`Failed to generate query embedding from provider: ${message}`);
   }
 
-  const item = response?.data?.[0];
-  if (!item || !Array.isArray(item.embedding) || item.embedding.length === 0) {
+  const vector = vectors?.[0];
+  if (!vector || !Array.isArray(vector) || vector.length === 0) {
     throw new Error("Invalid query embedding response from provider.");
   }
 
-  return item.embedding;
+  return vector;
 }
