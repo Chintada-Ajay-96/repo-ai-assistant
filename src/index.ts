@@ -6,6 +6,7 @@ import {
   searchCode,
   DEFAULT_VECTOR_STORE_PATH,
 } from "./vectorStore.js";
+import { retrieveRelevantCode, buildContext } from "./retrieval.js";
 
 // Load environment variables from .env if present
 try {
@@ -27,11 +28,67 @@ async function main() {
   const isEmbedMode = process.argv.includes("--embed");
   const isIndexMode = process.argv.includes("--index");
   const isSearchMode = process.argv.includes("--search");
+  const isRetrieveMode = process.argv.includes("--retrieve");
 
   // Filter out CLI option flags to obtain positional arguments
   const positionalArgs = process.argv.slice(2).filter((arg) => !arg.startsWith("--"));
 
-  // 1. Semantic Search Mode
+  // 1. Retrieval & Context Preparation Mode (Phase 2D)
+  if (isRetrieveMode) {
+    console.log("==========================================");
+    console.log("Code Retrieval (Phase 2D)");
+    console.log("==========================================");
+
+    const query = positionalArgs.join(" ").trim();
+    if (!query) {
+      console.log("\nPlease provide a retrieval query.");
+      console.log('Example: npm run retrieve -- "Where is authentication handled?"\n');
+      return;
+    }
+
+    if (!fs.existsSync(DEFAULT_VECTOR_STORE_PATH)) {
+      console.log(`\nVector store not found at ${DEFAULT_VECTOR_STORE_PATH}.`);
+      console.log("Please build the repository vector index first:\n  npm run index\n");
+      return;
+    }
+
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey || apiKey.trim() === "") {
+      printApiKeyInstructions("retrieve");
+      return;
+    }
+
+    console.log("\nQuery:");
+    console.log(query);
+
+    const retrieval = await retrieveRelevantCode(query);
+    const contextResult = buildContext(retrieval.results);
+
+    console.log("\nRetrieved chunks:\n");
+    if (retrieval.results.length === 0) {
+      console.log("No relevant code chunks found.");
+    } else {
+      retrieval.results.forEach((res, index) => {
+        console.log(`${index + 1}. ${res.chunk.symbol}`);
+        console.log(`   File: ${res.chunk.file}`);
+        console.log(`   Score: ${res.score.toFixed(4)}\n`);
+      });
+    }
+
+    console.log("==========================================");
+    console.log("LLM CONTEXT");
+    console.log("==========================================\n");
+
+    if (contextResult.includedChunks === 0) {
+      console.log("(No context generated)\n");
+    } else {
+      console.log(contextResult.context);
+      console.log();
+    }
+    return;
+  }
+
+  // 2. Semantic Search Mode
   if (isSearchMode) {
     console.log("==========================================");
     console.log("Semantic Search (Phase 2C)");
@@ -143,7 +200,8 @@ async function main() {
     console.log("Available Commands:");
     console.log("  - npm run embed   : Generate and inspect embeddings (Phase 2B)");
     console.log("  - npm run index   : Build and persist local vector index (Phase 2C)");
-    console.log("  - npm run search -- \"query\" : Perform semantic search (Phase 2C)\n");
+    console.log("  - npm run search -- \"query\"   : Perform semantic search (Phase 2C)");
+    console.log("  - npm run retrieve -- \"query\" : Retrieve code & build LLM context (Phase 2D)\n");
   }
 }
 

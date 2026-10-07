@@ -9,6 +9,7 @@
     "embed": "tsx src/index.ts --embed",
     "index": "tsx src/index.ts --index",
     "search": "tsx src/index.ts --search",
+    "retrieve": "tsx src/index.ts --retrieve",
     "test": "tsx --test tests/**/*.test.ts"
   },
   "repository": {
