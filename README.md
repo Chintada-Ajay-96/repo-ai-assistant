@@ -25,6 +25,14 @@ Vector Storage + Semantic Search
        ▼
 Phase 2D:
 Retrieval & Context Preparation
+       │
+       ▼
+Phase 3A:
+LLM Answer Generation Client (Gemini)
+       │
+       ▼
+Phase 3B:
+Complete Grounded RAG Answer Generation
 ```
 
 ```
@@ -50,10 +58,24 @@ src/vectorStore.ts     ──► Local JSON Vector Store (.data/vector-store.jso
        │
        ▼
 src/retrieval.ts       ──► Retrieval & Context Preparation
-                           ├── Query embedding & vector store query
-                           ├── Result deduplication via stable chunk IDs
-                           ├── Strict character limit budget (maxCharacters)
-                           └── Structured LLM context formatting
+       │                   ├── Query embedding & vector store query
+       │                   ├── Result deduplication via stable chunk IDs
+       │                   ├── Strict character limit budget (maxCharacters)
+       │                   └── Structured LLM context formatting
+       │
+       ▼
+src/llm.ts             ──► LLM Answer Generation Client (Phase 3A)
+       │                   ├── Provider-independent LLMClient interface
+       │                   ├── Official Google Gen AI SDK (@google/genai)
+       │                   ├── Default Flash model (gemini-2.5-flash)
+       │                   └── Safe response handling & error propagation
+       │
+       ▼
+src/answer.ts          ──► RAG Answer Generation Orchestrator (Phase 3B)
+                           ├── Query retrieval & context building
+                           ├── Grounded prompt construction
+                           ├── Empty retrieval handling (no hallucination)
+                           └── End-to-end answer generation via LLMClient
 ```
 
 ---
@@ -114,6 +136,50 @@ The `maxCharacters` parameter (default `12000`) sets a hard ceiling on the lengt
 
 ---
 
+## Phase 3A: LLM Answer Generation Client
+
+### Overview
+Phase 3A introduces a clean, provider-independent LLM client abstraction ([`src/llm.ts`](src/llm.ts)) for generating natural-language text responses:
+
+- **LLM Provider:** Google Gemini is used as the LLM provider via the official `@google/genai` JavaScript SDK.
+- **Model:** Defaults to `gemini-2.5-flash` (configurable through client options).
+- **Environment Configuration:** Requires `GEMINI_API_KEY` to be set in the environment or `.env` file for actual generation.
+- **Mocking & Testing:** Unit tests use dependency injection mocks to verify prompt passing, model configuration, error handling, and empty response safety without making network calls or requiring an API key.
+- **Scope Boundary:** This phase provides only the LLM client abstraction. Full end-to-end RAG answer generation (`npm run ask`), prompt assembly, and answer synthesis will be introduced in subsequent phases.
+
+---
+
+## Phase 3B: Grounded RAG Answer Generation
+
+### Overview
+Phase 3B connects the entire pipeline into the project's **first complete end-to-end Retrieval-Augmented Generation (RAG) system** ([`src/answer.ts`](src/answer.ts)):
+
+```text
+User Question
+      ↓
+Query Embedding (Phase 2B)
+      ↓
+Vector Search (Phase 2C)
+      ↓
+Relevant Code Chunks (Phase 2D)
+      ↓
+Context Builder (Phase 2D)
+      ↓
+Prompt Construction (Phase 3B)
+      ↓
+Gemini LLM (Phase 3A)
+      ↓
+Grounded Answer
+```
+
+### Key Principles & Behavior
+1. **Strict Repository Grounding**: The constructed prompt instructs the LLM that the retrieved repository context is the primary source of truth. The LLM must not invent nonexistent files, symbols, APIs, or behaviors.
+2. **Safe Empty Retrieval Handling**: If semantic search returns no relevant code chunks (or character limits exclude all chunks), the orchestrator immediately returns a clear message stating that no relevant context was found rather than calling the LLM or hallucinating evidence.
+3. **Dependency Injection**: The orchestrator accepts an [`LLMClient`](src/llm.ts) interface and `retrieveOptions`, allowing deterministic unit tests to run with mock embedding and LLM providers (zero API calls and zero latency).
+4. **Focused Scope**: The system currently **answers questions about retrieved repository code**. It does **not** edit code, generate diffs, or execute changes.
+
+---
+
 ## Data Structures
 
 ### VectorRecord & SearchResult (Phase 2C)
@@ -146,6 +212,36 @@ export interface ContextResult {
   context: string;
   includedChunks: number;
   totalCharacters: number;
+}
+```
+
+### LLMClient & GeminiClientOptions (Phase 3A)
+```ts
+export interface LLMClient {
+  generateText(prompt: string): Promise<string>;
+}
+
+export interface GeminiClientOptions {
+  apiKey?: string;
+  model?: string;
+  sdkClient?: GeminiSdkClient;
+}
+```
+
+### AnswerResult & RetrieveAndAnswerOptions (Phase 3B)
+```ts
+export interface AnswerResult {
+  answer: string;
+  retrievedChunks: number;
+  contextCharacters: number;
+  question?: string;
+  retrievedResults?: RetrievedChunk[];
+}
+
+export interface RetrieveAndAnswerOptions {
+  llmClient: LLMClient;
+  retrieveOptions?: RetrieveOptions;
+  contextOptions?: BuildContextOptions;
 }
 ```
 
@@ -257,13 +353,42 @@ function generateToken(user) {
 --------------------------------------------------
 ```
 
-### 6. Run Automated Tests
+### 6. Grounded Question Answering with RAG (Phase 3B)
+```bash
+npm run ask -- "Where is authentication handled?"
+```
+
+Example Answer Output:
+```text
+==========================================
+RAG Answer Generation (Phase 3B)
+==========================================
+
+Question:
+Where is authentication handled?
+
+Retrieving repository context and generating grounded answer...
+
+==========================================
+Answer:
+==========================================
+
+Authentication is handled in `sample-repo/auth.js` within the `AuthService` class and related helper functions:
+
+- `AuthService` (lines 9-13): Defines the class responsible for authentication. Its `login(user)` method delegates token creation to `generateToken(user)`.
+- `generateToken(user)` (lines 1-3): Creates a JSON Web Token signed with `SECRET` containing the user's ID payload.
+- `verifyToken(token)` (lines 5-7): Verifies tokens using `jwt.verify(token, SECRET)`.
+
+(Retrieved 2 chunk(s), 498 context characters)
+```
+
+### 7. Run Automated Tests
 Runs all unit and integration tests (zero network calls, zero API key required):
 ```bash
 npm test
 ```
 
-### 7. Type Check
+### 8. Type Check
 ```bash
 npx tsc --noEmit
 ```

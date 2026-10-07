@@ -7,6 +7,8 @@ import {
   DEFAULT_VECTOR_STORE_PATH,
 } from "./vectorStore.js";
 import { retrieveRelevantCode, buildContext } from "./retrieval.js";
+import { retrieveAndAnswer } from "./answer.js";
+import { GeminiClient } from "./llm.js";
 
 // Load environment variables from .env if present
 try {
@@ -24,16 +26,74 @@ function printApiKeyInstructions(command: string) {
   console.log(`  2. Run: npm run ${command}\n`);
 }
 
+function printGeminiApiKeyInstructions(command: string) {
+  console.log("\nNotice: GEMINI_API_KEY environment variable is not configured.");
+  console.log(`To use ${command} with Gemini API:`);
+  console.log("  1. Copy .env.example to .env or set the environment variable:");
+  console.log("     PowerShell: $env:GEMINI_API_KEY = \"your-api-key\"");
+  console.log("     Bash/Linux: export GEMINI_API_KEY=\"your-api-key\"");
+  console.log(`  2. Run: npm run ${command}\n`);
+}
+
 async function main() {
   const isEmbedMode = process.argv.includes("--embed");
   const isIndexMode = process.argv.includes("--index");
   const isSearchMode = process.argv.includes("--search");
   const isRetrieveMode = process.argv.includes("--retrieve");
+  const isAskMode = process.argv.includes("--ask");
 
   // Filter out CLI option flags to obtain positional arguments
   const positionalArgs = process.argv.slice(2).filter((arg) => !arg.startsWith("--"));
 
-  // 1. Retrieval & Context Preparation Mode (Phase 2D)
+  // 1. Complete RAG Answer Generation Mode (Phase 3B)
+  if (isAskMode) {
+    console.log("==========================================");
+    console.log("RAG Answer Generation (Phase 3B)");
+    console.log("==========================================");
+
+    const question = positionalArgs.join(" ").trim();
+    if (!question) {
+      console.log("\nPlease provide a question to ask.");
+      console.log('Example: npm run ask -- "Where is authentication handled?"\n');
+      return;
+    }
+
+    if (!fs.existsSync(DEFAULT_VECTOR_STORE_PATH)) {
+      console.log(`\nVector store not found at ${DEFAULT_VECTOR_STORE_PATH}.`);
+      console.log("Please build the repository vector index first:\n  npm run index\n");
+      return;
+    }
+
+    const openAiKey = process.env.OPENAI_API_KEY;
+    if (!openAiKey || openAiKey.trim() === "") {
+      printApiKeyInstructions("ask");
+      return;
+    }
+
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (!geminiKey || geminiKey.trim() === "") {
+      printGeminiApiKeyInstructions("ask");
+      return;
+    }
+
+    console.log("\nQuestion:");
+    console.log(question);
+    console.log("\nRetrieving repository context and generating grounded answer...\n");
+
+    const geminiClient = new GeminiClient();
+    const result = await retrieveAndAnswer(question, {
+      llmClient: geminiClient,
+    });
+
+    console.log("==========================================");
+    console.log("Answer:");
+    console.log("==========================================\n");
+    console.log(result.answer);
+    console.log(`\n(Retrieved ${result.retrievedChunks} chunk(s), ${result.contextCharacters} context characters)\n`);
+    return;
+  }
+
+  // 2. Retrieval & Context Preparation Mode (Phase 2D)
   if (isRetrieveMode) {
     console.log("==========================================");
     console.log("Code Retrieval (Phase 2D)");
@@ -201,7 +261,8 @@ async function main() {
     console.log("  - npm run embed   : Generate and inspect embeddings (Phase 2B)");
     console.log("  - npm run index   : Build and persist local vector index (Phase 2C)");
     console.log("  - npm run search -- \"query\"   : Perform semantic search (Phase 2C)");
-    console.log("  - npm run retrieve -- \"query\" : Retrieve code & build LLM context (Phase 2D)\n");
+    console.log("  - npm run retrieve -- \"query\" : Retrieve code & build LLM context (Phase 2D)");
+    console.log("  - npm run ask -- \"question\"   : Grounded RAG answer generation (Phase 3B)\n");
   }
 }
 
