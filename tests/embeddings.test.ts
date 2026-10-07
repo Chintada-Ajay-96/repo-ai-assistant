@@ -318,14 +318,14 @@ describe("embeddings - Gemini Embedding Migration (Phase 2B-G)", () => {
 
     const client = new GeminiEmbeddingClient({
       sdkClient: mockSdkClient,
-      model: "text-embedding-004",
+      model: "gemini-embedding-001",
     });
 
     const vectors = await client.embedTexts(["first snippet", "second snippet"]);
     assert.equal(vectors.length, 2);
     assert.deepEqual(vectors[0], [0.123, 0.456, 0.789]);
     assert.deepEqual(vectors[1], [0.123, 0.456, 0.789]);
-    assert.equal(requestedModel, "text-embedding-004");
+    assert.equal(requestedModel, "gemini-embedding-001");
     assert.deepEqual(receivedContents, ["first snippet", "second snippet"]);
   });
 
@@ -393,7 +393,7 @@ describe("embeddings - Gemini Embedding Migration (Phase 2B-G)", () => {
     // Default model
     const defaultClient = new GeminiEmbeddingClient({ sdkClient: mockSdkClient });
     assert.equal(defaultClient.getModel(), DEFAULT_EMBEDDING_MODEL);
-    assert.equal(DEFAULT_EMBEDDING_MODEL, "text-embedding-004");
+    assert.equal(DEFAULT_EMBEDDING_MODEL, "gemini-embedding-001");
 
     // Custom model
     const customClient = new GeminiEmbeddingClient({

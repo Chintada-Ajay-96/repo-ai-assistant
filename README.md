@@ -16,7 +16,7 @@ Symbols → Code Chunks
        │
        ▼
 Phase 2B-G:
-Code Chunks → Gemini Embeddings (text-embedding-004)
+Code Chunks → Gemini Embeddings (gemini-embedding-001)
        │
        ▼
 Phase 2C:
@@ -48,7 +48,7 @@ src/repoMap.ts         ──► Tree-sitter AST parsing & symbol extraction
 src/codeChunks.ts      ──► Semantic code chunking with line preservation
        │
        ▼
-src/embeddings.ts      ──► Gemini embedding generation (text-embedding-004)
+src/embeddings.ts      ──► Gemini embedding generation (gemini-embedding-001)
        │                   ├── Provider-independent EmbeddingClient interface
        │                   ├── Official Google Gen AI SDK (@google/genai)
        │                   ├── Configurable batching & ordering preservation
@@ -87,8 +87,8 @@ src/answer.ts          ──► RAG Answer Generation Orchestrator (Phase 3B)
 ## Unified Gemini Provider Architecture (Phase 2B-G)
 
 The project uses **Google Gemini** as the single unified provider for all AI capabilities:
-1. **Code Embeddings:** Generated using Gemini's official `text-embedding-004` model.
-2. **Query Embeddings:** Generated using the same Gemini `text-embedding-004` model to guarantee identical embedding space alignment.
+1. **Code Embeddings:** Generated using Gemini's official `gemini-embedding-001` model.
+2. **Query Embeddings:** Generated using the same Gemini `gemini-embedding-001` model to guarantee identical embedding space alignment.
 3. **Text Generation:** Generated using Gemini Flash (`gemini-2.5-flash`).
 
 ### API Key Requirement
@@ -99,7 +99,7 @@ GEMINI_API_KEY="your-gemini-api-key"
 There is **no** dependency on OpenAI or `OPENAI_API_KEY`.
 
 ### Vector Store Migration Note
-Because the embedding provider and model changed to Gemini (`text-embedding-004`):
+Because the embedding provider and model changed to Gemini (`gemini-embedding-001`):
 - Any previous vector stores generated with other models are considered **stale** and incompatible.
 - Running `npm run index` will cleanly overwrite and rebuild `.data/vector-store.json` using Gemini embeddings.
 
@@ -121,7 +121,7 @@ $$\text{similarity}(A, B) = \frac{A \cdot B}{\|A\| \times \|B\|} = \frac{\sum A_
 
 ### How Indexing Works (`npm run index`)
 1. Analyzes the target codebase and creates semantic code chunks.
-2. Batches chunks and calls the Gemini embedding API (`text-embedding-004`) to produce embedding vectors.
+2. Batches chunks and calls the Gemini embedding API (`gemini-embedding-001`) to produce embedding vectors.
 3. Associates each chunk with its vector and writes the index to `.data/vector-store.json`.
 
 ### How Semantic Search Works (`npm run search`)

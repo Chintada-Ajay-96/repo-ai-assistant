@@ -11,7 +11,7 @@ try {
 /**
  * Official default Gemini embedding model.
  */
-export const DEFAULT_EMBEDDING_MODEL = "text-embedding-004";
+export const DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001";
 
 /**
  * Default batch size for grouping chunks into embedding requests.
