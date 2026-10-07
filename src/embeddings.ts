@@ -151,3 +151,47 @@ export async function generateEmbeddings(
 
   return embeddedChunks;
 }
+
+/**
+ * Generates an embedding vector for a single query string.
+ * Reuses the existing OpenAI embedding client and configuration.
+ */
+export async function generateQueryEmbedding(
+  query: string,
+  options?: GenerateEmbeddingsOptions
+): Promise<number[]> {
+  if (!query || query.trim() === "") {
+    throw new Error("Query cannot be empty.");
+  }
+
+  const model = options?.model ?? DEFAULT_EMBEDDING_MODEL;
+
+  let client = options?.client;
+  if (!client) {
+    const apiKey = options?.apiKey ?? process.env.OPENAI_API_KEY;
+    if (!apiKey || apiKey.trim() === "") {
+      throw new Error(
+        "Missing OpenAI API key. Please set the OPENAI_API_KEY environment variable."
+      );
+    }
+    client = new OpenAI({ apiKey });
+  }
+
+  let response;
+  try {
+    response = await client.embeddings.create({
+      model,
+      input: [query.trim()],
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to generate query embedding from provider: ${message}`);
+  }
+
+  const item = response?.data?.[0];
+  if (!item || !Array.isArray(item.embedding) || item.embedding.length === 0) {
+    throw new Error("Invalid query embedding response from provider.");
+  }
+
+  return item.embedding;
+}

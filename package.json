@@ -7,6 +7,8 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "embed": "tsx src/index.ts --embed",
+    "index": "tsx src/index.ts --index",
+    "search": "tsx src/index.ts --search",
     "test": "tsx --test tests/**/*.test.ts"
   },
   "repository": {
