@@ -9,12 +9,90 @@ import {
 import { retrieveRelevantCode, buildContext } from "./retrieval.js";
 import { retrieveAndAnswer } from "./answer.js";
 import { GeminiClient } from "./llm.js";
+import {
+  analyzeChangeTarget,
+  AmbiguousTargetError,
+  StaleIndexError,
+  EmptyRetrievalError,
+  NoMatchingTargetError,
+  TargetFileNotFoundError,
+} from "./changeAnalysis.js";
+import {
+  generateChangeFromContext,
+  MalformedModelResponseError,
+  LLMGenerationError,
+} from "./changeGenerator.js";
+import { validateProposedChange } from "./changeValidation.js";
 
 // Load environment variables from .env if present
 try {
   process.loadEnvFile();
 } catch {
   // Ignore if .env does not exist
+}
+
+export interface ParsedProposeArgs {
+  instruction: string;
+  targetFile?: string | undefined;
+  targetSymbol?: string | undefined;
+  error?: string | undefined;
+}
+
+/**
+ * Parses CLI arguments for the --propose command.
+ * Correctly extracts instruction, --file, and --symbol hints without leaking flag values into the instruction.
+ */
+export function parseProposeArgs(args: string[]): ParsedProposeArgs {
+  let targetFile: string | undefined;
+  let targetSymbol: string | undefined;
+  const instructionTokens: string[] = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+
+    if (arg === "--propose") {
+      continue;
+    }
+
+    if (arg === "--file") {
+      const next = args[i + 1];
+      if (!next || next.startsWith("--")) {
+        return {
+          instruction: "",
+          error: "Missing value for --file flag. Expected a file path.",
+        };
+      }
+      targetFile = next;
+      i++;
+      continue;
+    }
+
+    if (arg === "--symbol") {
+      const next = args[i + 1];
+      if (!next || next.startsWith("--")) {
+        return {
+          instruction: "",
+          error: "Missing value for --symbol flag. Expected a symbol name.",
+        };
+      }
+      targetSymbol = next;
+      i++;
+      continue;
+    }
+
+    if (arg.startsWith("--")) {
+      continue;
+    }
+
+    instructionTokens.push(arg);
+  }
+
+  const instruction = instructionTokens.join(" ").trim();
+  return {
+    instruction,
+    targetFile,
+    targetSymbol,
+  };
 }
 
 function printGeminiApiKeyInstructions(command: string) {
@@ -32,11 +110,173 @@ async function main() {
   const isSearchMode = process.argv.includes("--search");
   const isRetrieveMode = process.argv.includes("--retrieve");
   const isAskMode = process.argv.includes("--ask");
+  const isProposeMode = process.argv.includes("--propose");
 
   // Filter out CLI option flags to obtain positional arguments
   const positionalArgs = process.argv.slice(2).filter((arg) => !arg.startsWith("--"));
 
-  // 1. Complete RAG Answer Generation Mode (Phase 3B)
+  // 1. Code Change Assistance Mode (Phase 4)
+  if (isProposeMode) {
+    console.log("==========================================");
+    console.log("Code Change Assistance (Phase 4)");
+    console.log("==========================================");
+
+    const parsed = parseProposeArgs(process.argv.slice(2));
+    if (parsed.error) {
+      console.log(`\nError: ${parsed.error}`);
+      console.log('Example: npm run propose -- "Add validation to verifyToken" --file sample-repo/auth.js --symbol verifyToken\n');
+      return;
+    }
+
+    if (!parsed.instruction) {
+      console.log("\nPlease provide a change instruction.");
+      console.log('Example: npm run propose -- "Add validation to verifyToken"\n');
+      console.log("Optional hints:");
+      console.log("  --file <path>    Specify target file path to disambiguate");
+      console.log("  --symbol <name>  Specify target symbol name to disambiguate\n");
+      return;
+    }
+
+    if (!fs.existsSync(DEFAULT_VECTOR_STORE_PATH)) {
+      console.log(`\nVector store not found at ${DEFAULT_VECTOR_STORE_PATH}.`);
+      console.log("Please build the repository vector index first:\n  npm run index\n");
+      return;
+    }
+
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (!geminiKey || geminiKey.trim() === "") {
+      printGeminiApiKeyInstructions("propose");
+      return;
+    }
+
+    console.log("\nInstruction:");
+    console.log(parsed.instruction);
+    if (parsed.targetFile) {
+      console.log(`Target File Hint: ${parsed.targetFile}`);
+    }
+    if (parsed.targetSymbol) {
+      console.log(`Target Symbol Hint: ${parsed.targetSymbol}`);
+    }
+    console.log();
+
+    try {
+      // 1. Phase 4A: Target Analysis & Line Verification
+      console.log("1. Analyzing repository and identifying target symbol...");
+      const context = await analyzeChangeTarget(parsed.instruction, {
+        targetFile: parsed.targetFile,
+        targetSymbol: parsed.targetSymbol,
+      });
+
+      console.log(`   ✓ Target identified: ${context.target.file} :: ${context.target.symbol} (${context.target.type}, lines ${context.target.startLine}-${context.target.endLine})`);
+      console.log(`   ✓ Source verified against disk (similarity: ${context.target.score.toFixed(4)})`);
+      if (context.references.length > 0) {
+        console.log(`   ✓ Retrieved ${context.references.length} reference context chunk(s)`);
+      }
+
+      // 2. Phase 4B: Code Change Generation
+      console.log("\n2. Generating proposed replacement with Gemini (gemini-2.5-flash)...");
+      const geminiClient = new GeminiClient();
+      const proposal = await generateChangeFromContext(context, {
+        llmClient: geminiClient,
+      });
+      console.log("   ✓ Proposed replacement and unified diff generated.");
+
+      // 3. Phase 4C: In-Memory Validation & AST Syntax Check
+      console.log("\n3. Validating proposed change and verifying Tree-sitter AST syntax...");
+      const plan = await validateProposedChange(proposal);
+
+      console.log("\n" + plan.preview);
+
+      if (plan.isValid) {
+        console.log("\n==========================================");
+        console.log("Summary: Proposed change is syntactically valid and ready for review.");
+        console.log("Notice: This was a dry-run. No files on disk were modified.");
+        console.log("==========================================\n");
+      } else {
+        console.log("\n==========================================");
+        console.log("Summary: Proposed change failed validation.");
+        console.log("Notice: No files on disk were modified.");
+        console.log("==========================================\n");
+      }
+    } catch (err: unknown) {
+      if (err instanceof AmbiguousTargetError) {
+        console.log("\n==========================================");
+        console.log("Ambiguous Change Target");
+        console.log("==========================================");
+        console.log("The change instruction matched multiple candidate symbols with similar relevance:\n");
+        err.candidates.forEach((cand, idx) => {
+          console.log(`  ${idx + 1}. ${cand.chunk.symbol} (${cand.chunk.type})`);
+          console.log(`     File: ${cand.chunk.file}:${cand.chunk.startLine}-${cand.chunk.endLine}`);
+          console.log(`     Similarity: ${cand.score.toFixed(4)}\n`);
+        });
+        console.log("To resolve this ambiguity, provide a target hint:");
+        console.log(`  npm run propose -- "${parsed.instruction}" --symbol <symbol_name>`);
+        console.log(`  npm run propose -- "${parsed.instruction}" --file <file_path>\n`);
+        return;
+      }
+
+      if (err instanceof StaleIndexError) {
+        console.log("\n==========================================");
+        console.log("Stale Repository Index Detected");
+        console.log("==========================================");
+        console.log(`File: ${err.file} (lines ${err.startLine}-${err.endLine})`);
+        console.log("The current code on disk does not match the indexed code in .data/vector-store.json.");
+        console.log("\nTo fix this, please re-index the repository:");
+        console.log("  npm run index\n");
+        return;
+      }
+
+      if (err instanceof EmptyRetrievalError) {
+        console.log("\n==========================================");
+        console.log("No Matching Code Found");
+        console.log("==========================================");
+        console.log(`No relevant repository code was found for: "${parsed.instruction}"`);
+        console.log("Please check your instruction or re-index the repository: npm run index\n");
+        return;
+      }
+
+      if (err instanceof NoMatchingTargetError) {
+        console.log("\n==========================================");
+        console.log("Target Hint Not Found");
+        console.log("==========================================");
+        console.log(err.message);
+        console.log("Please verify the --file or --symbol hints provided.\n");
+        return;
+      }
+
+      if (err instanceof TargetFileNotFoundError) {
+        console.log("\n==========================================");
+        console.log("Target File Not Found");
+        console.log("==========================================");
+        console.log(`File: ${err.file}`);
+        console.log("The target file does not exist on disk. Please re-index the repository with 'npm run index'.\n");
+        return;
+      }
+
+      if (err instanceof MalformedModelResponseError) {
+        console.log("\n==========================================");
+        console.log("Model Response Format Error");
+        console.log("==========================================");
+        console.log(err.message);
+        console.log("The AI model returned an unparseable response. Please try running the command again.\n");
+        return;
+      }
+
+      if (err instanceof LLMGenerationError) {
+        console.log("\n==========================================");
+        console.log("AI Generation Error");
+        console.log("==========================================");
+        console.log(err.message);
+        console.log("Failed to communicate with the Gemini API. Please check your network and API key.\n");
+        return;
+      }
+
+      console.error("\nUnexpected error during change proposal execution:", err);
+    }
+    return;
+  }
+
+  // 2. Complete RAG Answer Generation Mode (Phase 3B)
   if (isAskMode) {
     console.log("==========================================");
     console.log("RAG Answer Generation (Phase 3B)");
@@ -247,7 +487,8 @@ async function main() {
     console.log("  - npm run index   : Build and persist local vector index (Phase 2C)");
     console.log("  - npm run search -- \"query\"   : Perform semantic search (Phase 2C)");
     console.log("  - npm run retrieve -- \"query\" : Retrieve code & build LLM context (Phase 2D)");
-    console.log("  - npm run ask -- \"question\"   : Grounded RAG answer generation (Phase 3B)\n");
+    console.log("  - npm run ask -- \"question\"   : Grounded RAG answer generation (Phase 3B)");
+    console.log("  - npm run propose -- \"instruction\" : Propose and validate code change (Phase 4)\n");
   }
 }
 

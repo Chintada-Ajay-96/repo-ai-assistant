@@ -11,6 +11,7 @@
     "search": "tsx src/index.ts --search",
     "retrieve": "tsx src/index.ts --retrieve",
     "ask": "tsx src/index.ts --ask",
+    "propose": "tsx src/index.ts --propose",
     "test": "tsx --test tests/**/*.test.ts"
   },
   "repository": {
