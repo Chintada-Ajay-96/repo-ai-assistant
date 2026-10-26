@@ -1,0 +1,16 @@
+{
+  "name": "repo-assistant-verification",
+  "version": "1.0.0",
+  "description": "Hardened container dependencies for isolated verification",
+  "type": "module",
+  "dependencies": {
+    "@google/genai": "^2.27.0",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "^0.24.6"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

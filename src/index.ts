@@ -23,6 +23,8 @@ import {
   LLMGenerationError,
 } from "./changeGenerator.js";
 import { validateProposedChange } from "./changeValidation.js";
+import { discoverTests } from "./testDiscovery.js";
+import { verifyProposedChange } from "./verification/index.js";
 
 // Load environment variables from .env if present
 try {
@@ -35,6 +37,7 @@ export interface ParsedProposeArgs {
   instruction: string;
   targetFile?: string | undefined;
   targetSymbol?: string | undefined;
+  verify?: boolean | undefined;
   error?: string | undefined;
 }
 
@@ -45,12 +48,18 @@ export interface ParsedProposeArgs {
 export function parseProposeArgs(args: string[]): ParsedProposeArgs {
   let targetFile: string | undefined;
   let targetSymbol: string | undefined;
+  let verify = false;
   const instructionTokens: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
 
     if (arg === "--propose") {
+      continue;
+    }
+
+    if (arg === "--verify") {
+      verify = true;
       continue;
     }
 
@@ -92,6 +101,7 @@ export function parseProposeArgs(args: string[]): ParsedProposeArgs {
     instruction,
     targetFile,
     targetSymbol,
+    verify,
   };
 }
 
@@ -192,6 +202,37 @@ async function main() {
         console.log("Summary: Proposed change is syntactically valid and ready for review.");
         console.log("Notice: This was a dry-run. No files on disk were modified.");
         console.log("==========================================\n");
+
+        if (parsed.verify || process.argv.includes("--verify")) {
+          console.log("4. Running isolated behavioral verification (Phase 5B)...");
+          const testDiscovery = await discoverTests({
+            repoRoot: process.cwd(),
+            targetFile: plan.proposal.file,
+            targetSymbol: plan.proposal.symbol,
+          });
+
+          console.log(`   ✓ Discovered ${testDiscovery.tests.length} candidate test(s)`);
+          const verification = await verifyProposedChange({
+            validatedPlan: plan,
+            testDiscovery,
+            repoRoot: process.cwd(),
+          });
+
+          console.log("\n==========================================");
+          console.log(`Verification Status: ${verification.status.toUpperCase()}`);
+          console.log("==========================================");
+          if (verification.failureReason) {
+            console.log(`Details: ${verification.failureReason}`);
+          }
+          if (verification.executionSummary) {
+            console.log(
+              `Tests: ${verification.executionSummary.passed} passed, ${verification.executionSummary.failed} failed, ${verification.executionSummary.skipped} skipped, ${verification.executionSummary.todo} todo (${verification.executionSummary.totalReported} total)`
+            );
+          }
+          console.log(`Cleanup: ${verification.cleanupStatus}`);
+          console.log(`\n${verification.securityNotice}`);
+          console.log(`\n${verification.semanticDisclaimer}\n`);
+        }
       } else {
         console.log("\n==========================================");
         console.log("Summary: Proposed change failed validation.");

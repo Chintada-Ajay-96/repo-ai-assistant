@@ -1,0 +1,32 @@
+# docker/Dockerfile.verification.offline
+# Mode 2: Strict offline image provisioning requiring pre-populated npm-cache
+# Base image must already exist in local Docker daemon store
+FROM node:20.18.0-bookworm-slim@sha256:28fbbb764069c698ead61d6a739a7615e8f0e07a4b8fe1473ceca70c1c3d6aaa
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV NODE_ENV=test
+ENV PATH="/node_modules/.bin:${PATH}"
+
+WORKDIR /
+
+# 1. Copy locked manifests
+COPY package.verification.json ./package.json
+COPY package-lock.verification.json ./package-lock.json
+
+# 2. Copy the verified local cache into the build image
+# Fails immediately if npm-cache directory is missing from the build context
+COPY npm-cache/ /npm-cache/
+
+# 3. Strict offline installation
+# If any package is missing from /npm-cache, npm fails immediately with ENOTCACHED. Zero network fallback.
+RUN npm ci --offline --cache /npm-cache --ignore-scripts --no-audit --no-fund && \
+    rm -rf /npm-cache && \
+    ln -s /node_modules/.bin/tsx /usr/local/bin/tsx && \
+    chmod -R 555 /node_modules
+
+# 4. Copy audited smoke test matrix suite
+COPY smokeTest.ts /opt/smokeTest.ts
+RUN chmod 555 /opt/smokeTest.ts
+
+USER 1000:1000
+WORKDIR /workspace

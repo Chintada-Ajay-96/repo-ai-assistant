@@ -1,0 +1,25 @@
+# docker/Dockerfile.verification
+# Mode 1: Network-assisted image provisioning enforcing SHA-512 package lockfile integrity
+FROM node:20.18.0-bookworm-slim@sha256:28fbbb764069c698ead61d6a739a7615e8f0e07a4b8fe1473ceca70c1c3d6aaa
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV NODE_ENV=test
+ENV PATH="/node_modules/.bin:${PATH}"
+
+WORKDIR /
+
+# 1. Copy locked manifests only (no npm-cache required in context)
+COPY package.verification.json ./package.json
+COPY package-lock.verification.json ./package-lock.json
+
+# 2. Network-assisted installation enforcing SHA-512 lockfile integrity
+RUN npm ci --ignore-scripts --no-audit --no-fund && \
+    ln -s /node_modules/.bin/tsx /usr/local/bin/tsx && \
+    chmod -R 555 /node_modules
+
+# 3. Copy audited smoke test matrix suite
+COPY smokeTest.ts /opt/smokeTest.ts
+RUN chmod 555 /opt/smokeTest.ts
+
+USER 1000:1000
+WORKDIR /workspace
