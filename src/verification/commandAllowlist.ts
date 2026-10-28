@@ -90,14 +90,13 @@ export function resolveApprovedTestCommand(
       (t) => t.confidenceTier === "high" || t.confidenceTier === "medium"
     );
 
-    // Fall back to all discovered tests if none are in high/medium tiers
-    const targetList = eligibleTests.length > 0 ? eligibleTests : testDiscovery.tests;
-    candidatePaths = targetList.map((t) => t.filePath);
+    // Refuse to silently run unassociated low-confidence tests when no likely candidates exist
+    candidatePaths = eligibleTests.map((t) => t.filePath);
   }
 
   if (candidatePaths.length === 0) {
     throw new SecurityPolicyError(
-      "No candidate test files available for verification. Verification requires at least one candidate test."
+      `No candidate test files with sufficient confidence (high or medium) available for verification of target "${testDiscovery.targetFile}". Verification requires candidate tests associated with the target.`
     );
   }
 

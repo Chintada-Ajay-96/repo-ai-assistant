@@ -125,6 +125,18 @@ test("workspaceStager - Workspace Staging, Containment & Bounded Cleanup Suite",
     );
   });
 
+  await t.test("should reject target outside allowlist with SecurityPolicyError even if directory does not exist in staging", () => {
+    assert.throws(
+      () => validateAndResolveTargetPath(fixtureRoot, "sample-repo/auth.js"),
+      (err: any) => {
+        return (
+          err instanceof SecurityPolicyError &&
+          err.message.includes("is not within the permitted staging allowlist")
+        );
+      }
+    );
+  });
+
   await t.test("safeRecordBookkeeping should safely absorb both synchronous throws and asynchronous rejections", () => {
     // Synchronous throw
     assert.doesNotThrow(() => {

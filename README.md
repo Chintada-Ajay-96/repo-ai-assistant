@@ -33,53 +33,92 @@ LLM Answer Generation Client (Gemini)
        ▼
 Phase 3B:
 Complete Grounded RAG Answer Generation
+       │
+       ▼
+Phase 4:
+Read-Only Code Change Assistance (Target Analysis → Diff Generation → Tree-sitter AST Syntax Check)
+       │
+       ▼
+Phase 5A:
+Candidate Test Discovery & Multi-Tier Ranking
+       │
+       ▼
+Phase 5B:
+Isolated Docker-based Code Verification & Status Withholding
 ```
 
 ```
 Repository Root
        │
        ▼
-src/utils/walkRepo.ts  ──► Recursive directory discovery (.js, .jsx, .ts, .tsx)
+src/utils/walkRepo.ts    ──► Recursive directory discovery (.js, .jsx, .ts, .tsx)
        │
        ▼
-src/repoMap.ts         ──► Tree-sitter AST parsing & symbol extraction
+src/repoMap.ts           ──► Tree-sitter AST parsing & symbol extraction
        │
        ▼
-src/codeChunks.ts      ──► Semantic code chunking with line preservation
+src/codeChunks.ts        ──► Semantic code chunking with line preservation
        │
        ▼
-src/embeddings.ts      ──► Gemini embedding generation (gemini-embedding-001)
-       │                   ├── Provider-independent EmbeddingClient interface
-       │                   ├── Official Google Gen AI SDK (@google/genai)
-       │                   ├── Configurable batching & ordering preservation
-       │                   └── Query embedding in unified vector space
+src/embeddings.ts        ──► Gemini embedding generation (gemini-embedding-001)
+       │                     ├── Provider-independent EmbeddingClient interface
+       │                     ├── Official Google Gen AI SDK (@google/genai)
+       │                     ├── Configurable batching & ordering preservation
+       │                     └── Query embedding in unified vector space
        │
        ▼
-src/vectorStore.ts     ──► Local JSON Vector Store (.data/vector-store.json)
-       │                   ├── Persistence (saveToFile / loadFromFile)
-       │                   ├── Cosine Similarity: dot(A, B) / (||A|| * ||B||)
-       │                   └── Top-K Semantic Search
+src/vectorStore.ts       ──► Local JSON Vector Store (.data/vector-store.json)
+       │                     ├── Persistence (saveToFile / loadFromFile)
+       │                     ├── Cosine Similarity: dot(A, B) / (||A|| * ||B||)
+       │                     └── Top-K Semantic Search
        │
        ▼
-src/retrieval.ts       ──► Retrieval & Context Preparation
-       │                   ├── Query embedding & vector store query
-       │                   ├── Result deduplication via stable chunk IDs
-       │                   ├── Strict character limit budget (maxCharacters)
-       │                   └── Structured LLM context formatting
+src/retrieval.ts         ──► Retrieval & Context Preparation
+       │                     ├── Query embedding & vector store query
+       │                     ├── Result deduplication via stable chunk IDs
+       │                     ├── Strict character limit budget (maxCharacters)
+       │                     └── Structured LLM context formatting
        │
        ▼
-src/llm.ts             ──► LLM Answer Generation Client (Phase 3A)
-       │                   ├── Provider-independent LLMClient interface
-       │                   ├── Official Google Gen AI SDK (@google/genai)
-       │                   ├── Default Flash model (gemini-2.5-flash)
-       │                   └── Safe response handling & error propagation
+src/llm.ts               ──► LLM Text Generation Client (Phase 3A)
+       │                     ├── Provider-independent LLMClient interface
+       │                     ├── Official Google Gen AI SDK (@google/genai)
+       │                     ├── Default Flash model (gemini-2.5-flash)
+       │                     └── Safe response handling & error propagation
        │
        ▼
-src/answer.ts          ──► RAG Answer Generation Orchestrator (Phase 3B)
-                           ├── Query retrieval & context building
-                           ├── Grounded prompt construction
-                           ├── Empty retrieval handling (no hallucination)
-                           └── End-to-end answer generation via LLMClient
+src/answer.ts            ──► Grounded RAG Answer Generation (Phase 3B)
+       │                     ├── Query retrieval & context building
+       │                     ├── Grounded prompt construction (no hallucinations)
+       │                     └── End-to-end answer generation via LLMClient
+       │
+       ▼
+src/changeAnalysis.ts    ──► Target Analysis & Line Verification (Phase 4A)
+       │                     ├── Disambiguation & confidence ranking
+       │                     └── Baseline disk freshness validation
+       │
+       ▼
+src/changeGenerator.ts   ──► Code Change & Unified Diff Generation (Phase 4B)
+       │                     ├── Context-grounded instruction prompting
+       │                     └── Gemini Flash replacement generation
+       │
+       ▼
+src/changeValidation.ts  ──► In-Memory Tree-sitter AST Syntax Validation (Phase 4C)
+       │                     ├── Dry-run virtual replacement (zero disk writes)
+       │                     └── Grammatical AST parse error detection
+       │
+       ▼
+src/testDiscovery.ts     ──► Candidate Test Discovery & Ranking (Phase 5A)
+       │                     ├── Multi-tier confidence scoring
+       │                     └── Stem, symbol, and folder affinity matching
+       │
+       ▼
+src/verification/        ──► Isolated Docker Verification Orchestrator (Phase 5B)
+                             ├── workspaceStager.ts   (Out-of-tree staging in os.tmpdir)
+                             ├── commandAllowlist.ts  (Traversal & illegal syntax rejection)
+                             ├── dockerSandbox.ts     (Hardened sandbox: --network none, --read-only)
+                             ├── tapParser.ts         (Scope-stack TAP v13 machine-readable parser)
+                             └── verifier.ts          (Strict status withholding invariant)
 ```
 
 ---
@@ -280,6 +319,172 @@ export interface RetrieveAndAnswerOptions {
 
 ---
 
+## Phase 4: Read-Only Code Change Assistance
+
+### Overview
+Phase 4 extends the assistant from read-only question answering to **read-only code change proposal and syntactic validation** ([`src/changeAnalysis.ts`](src/changeAnalysis.ts), [`src/changeGenerator.ts`](src/changeGenerator.ts), [`src/changeValidation.ts`](src/changeValidation.ts)):
+
+```text
+User Instruction + Optional Target Hints (--file, --symbol)
+       ↓
+Target Analysis (Phase 4A)
+  ├── Semantic ranking & candidate disambiguation
+  ├── Line boundary verification & disk freshness validation
+  └── Reference context retrieval
+       ↓
+Code Change Generation (Phase 4B)
+  ├── Structured Gemini Flash prompting (gemini-2.5-flash)
+  └── Proposed replacement & unified diff generation
+       ↓
+In-Memory Validation (Phase 4C)
+  ├── Virtual replacement simulation (zero host disk writes)
+  └── Tree-sitter AST syntax parsing & error detection
+       ↓
+Structured Change Validation Report
+```
+
+### Key Principles & Safety Guarantees
+1. **Strictly Read-Only (Dry-Run by Default)**: The engine never writes changes to the repository files on disk. All modifications exist exclusively as in-memory simulations and unified diff previews for human review.
+2. **Ambiguity Detection**: If an instruction matches multiple candidate symbols with close similarity scores, the analyzer throws an `AmbiguousTargetError` and prompts the user to supply a `--file` or `--symbol` hint to avoid applying changes to the wrong component.
+3. **Stale Index Guard**: If the current code on disk differs from the indexed code in `.data/vector-store.json`, a `StaleIndexError` is thrown, advising the developer to re-index (`npm run index`).
+4. **Tree-sitter AST Syntax Validation**:
+   - The proposed replacement is virtually spliced into the target file in memory.
+   - The spliced source is parsed using the appropriate WebAssembly Tree-sitter grammar (JavaScript, TypeScript, or TSX).
+   - The AST is inspected for syntax errors (`rootNode.hasError()`, `ERROR` nodes, `MISSING` nodes).
+   - **Important Limitation**: AST syntax validation proves *grammatical validity*. It does **not** guarantee runtime semantic correctness, type safety, or absence of logical bugs.
+
+---
+
+## Phase 5: Candidate Test Discovery & Isolated Docker Verification
+
+### Overview
+Phase 5 introduces **isolated, hardened container execution** to verify proposed code changes against real candidate tests without risking the host development environment ([`src/testDiscovery.ts`](src/testDiscovery.ts), [`src/verification/`](src/verification/)):
+
+```text
+Validated Change Plan (Phase 4)
+       ↓
+Candidate Test Discovery (Phase 5A, src/testDiscovery.ts)
+  ├── Stem match, symbol reference, directory affinity scoring
+  └── Allowlisted test file resolution
+       ↓
+Out-of-Tree Workspace Staging (Phase 5B, src/verification/workspaceStager.ts)
+  ├── Copy allowlisted files to os.tmpdir() (host repo strictly read-only)
+  ├── Apply virtual patch to staged copy
+  └── No-Op change detection (fails closed if proposed code equals disk)
+       ↓
+Ephemeral Permission Probe (src/verification/dockerSandbox.ts)
+  └── Container UID 1000 write capability verification
+       ↓
+Hardened Docker Sandbox Execution (src/verification/dockerSandbox.ts)
+  ├── --network none (zero network access)
+  ├── --pull never (refuses unverified remote image downloads)
+  ├── --read-only root filesystem
+  ├── --user 1000:1000 (non-root execution)
+  ├── --cap-drop ALL (all Linux capabilities dropped)
+  ├── --security-opt no-new-privileges:true
+  ├── --tmpfs /tmp:rw,noexec,nosuid,size=64m
+  ├── Fixed resource limits (memory, CPU, PIDs ceiling)
+  └── Execution of approved runner: /node_modules/.bin/tsx --test --test-reporter=tap
+       ↓
+Machine-Readable TAP v13 Parser (src/verification/tapParser.ts)
+  ├── Scope-stack ID reconciliation (no subtest ID collisions)
+  ├── Suite wrapper identification (type: 'suite')
+  └── Plan count and discrete assertion reconciliation
+       ↓
+Bounded Asynchronous Cleanup & Status Withholding Invariant (src/verification/verifier.ts)
+  ├── Bounded 3-second wait for container stoppage & staging removal
+  └── Strict Status Withholding: If cleanup or container stoppage is unconfirmed,
+      passing test status is withheld and replaced with ERROR
+```
+
+### Docker Security Sandbox Controls
+- **`--network none`**: Disables all network interfaces except loopback. Containers cannot communicate with external services or local network devices.
+- **`--pull never`**: Prevents the Docker daemon from reaching out to external registries. Only locally built, verified images are permitted.
+- **`--read-only`**: The container's root filesystem is mounted read-only.
+- **`--user 1000:1000`**: Container processes run as unprivileged user `app` (UID/GID 1000:1000).
+- **`--cap-drop ALL`**: Drops all Linux kernel capabilities (`CapEff: 0000000000000000`).
+- **`--security-opt no-new-privileges:true`**: Prevents child processes from acquiring additional privileges (`NoNewPrivs: 1`).
+- **`--tmpfs /tmp:rw,noexec,nosuid,size=64m`**: Ephemeral `/tmp` mount configured without execution permissions.
+- **Resource Ceilings**: Enforces memory limit (`--memory 1024m`), CPU limit (`--cpus 1.0`), and process ceiling (`--pids-limit 64`).
+- **Pinned Image ID**: Execution requires an exact 64-character SHA-256 local Image ID (`sha256:...`). Mutable tags are strictly rejected.
+
+### Host Repository Immutability Guarantee
+- Staging takes place exclusively inside `os.tmpdir()` in a dedicated directory (`repo-assistant-verify-<uuid>`).
+- The host repository is opened in read-only mode during file copying.
+- The host repository is never targeted for writing during the verification lifecycle.
+- Filesystem changes exist solely inside the temporary staging directory and are cleaned up upon test completion.
+
+### Meaning of Verification Outcomes
+| Outcome | Description |
+| :--- | :--- |
+| **`PASSED`** | Discovered candidate tests executed inside the sandbox and all assertions passed (exit code `0`). |
+| **`FAILED`** | One or more test assertions failed, the test runner crashed, or the proposal was detected as a No-Op change. |
+| **`TIMED_OUT`** | Test execution exceeded the configured wall-clock timeout (default 30 seconds) and was terminated. |
+| **`OUTPUT_LIMIT_EXCEEDED`** | Test output produced runaway stdout/stderr exceeding buffer limit (default 512KB) and was terminated. |
+| **`UNAVAILABLE`** | Verification was refused because Docker Desktop is not running, the named pipe is inaccessible, or the image is unprovisioned. Untrusted execution on the host was refused. |
+| **`ERROR`** | An operational failure occurred (e.g. invalid change plan, traversal in test path, or failure to confirm workspace cleanup). |
+
+> [!IMPORTANT]
+> **Semantic Correctness Disclaimer**: A `PASSED` verification outcome proves that the discovered test assertions ran and passed against the proposed change inside the isolated container. Passing tests do **not** prove that the change is completely correct, bug-free, or free of regressions outside the scope of the executed test suite.
+
+---
+
+## Data Structures (Phases 4 & 5)
+
+### TargetContext, ProposedChange, & ChangeValidationPlan (Phase 4)
+```ts
+export interface TargetContext {
+  instruction: string;
+  target: RankedChunk;
+  references: RankedChunk[];
+  diskContent: string;
+}
+
+export interface ProposedChange {
+  file: string;
+  symbol: string;
+  targetFile: string;
+  targetSymbol: string;
+  startLine: number;
+  endLine: number;
+  originalCode: string;
+  proposedCode: string;
+  diff: string;
+  explanation: string;
+}
+
+export interface ChangeValidationPlan {
+  isValid: boolean;
+  proposal: ProposedChange;
+  checks: ValidationCheckResult[];
+  preview: string;
+  syntaxNotice: string;
+  failureReason?: string;
+}
+```
+
+### VerificationResult (Phase 5B)
+```ts
+export interface VerificationResult {
+  status: "passed" | "failed" | "timed_out" | "output_limit_exceeded" | "unavailable" | "error";
+  environment: "docker" | "none";
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  outputTruncated: boolean;
+  durationMs: number;
+  command?: ApprovedTestCommand;
+  executionSummary?: TestExecutionSummary;
+  cleanupStatus: "cleaned" | "failed" | "not_applicable";
+  failureReason?: string;
+  warnings: string[];
+  securityNotice: string;
+  semanticDisclaimer: string;
+}
+```
+
+---
+
 ## Scripts & Usage
 
 ### 1. View Code Chunks (Phase 2A)
@@ -415,13 +620,200 @@ Authentication is handled in `sample-repo/auth.js` within the `AuthService` clas
 (Retrieved 2 chunk(s), 498 context characters)
 ```
 
-### 7. Run Automated Tests
-Runs all unit and integration tests (zero network calls, zero API key required):
-```bash
+### 7. Propose & Validate Code Changes (Phase 4)
+
+Generate a read-only code change proposal with unified diff and in-memory Tree-sitter AST syntax validation:
+
+```powershell
+npx tsx src/index.ts --propose "Add a null check to verifyToken" --file sample-repo/auth.js --symbol verifyToken
+```
+
+> [!TIP]
+> **Windows PowerShell Flag Forwarding**: On Windows PowerShell, invoke commands directly via `npx tsx src/index.ts` rather than `npm run propose -- ...`. The npm wrapper on Windows can swallow or misparse secondary flags (`--file`, `--symbol`, `--verify`), whereas direct `npx tsx` invocation guarantees deterministic argument forwarding.
+
+Real CLI Output:
+```text
+==========================================
+Code Change Assistance (Phase 4)
+==========================================
+
+Instruction:
+Add a null check to verifyToken
+Target File Hint: sample-repo/auth.js
+Target Symbol Hint: verifyToken
+
+1. Analyzing repository and identifying target symbol...
+   ✓ Target identified: sample-repo/auth.js :: verifyToken (function, lines 5-7)
+   ✓ Source verified against disk (similarity: 0.6833)
+   ✓ Retrieved 3 reference context chunk(s)
+
+2. Generating proposed replacement with Gemini (gemini-2.5-flash)...
+   ✓ Proposed replacement and unified diff generated.
+
+3. Validating proposed change and verifying Tree-sitter AST syntax...
+
+==================================================
+CHANGE VALIDATION REPORT
+==================================================
+Target: sample-repo/auth.js :: verifyToken (lines 5-7)
+Status: PASSED (Ready for review)
+
+CHECKLIST:
+  [PASS] File Existence: File exists on disk: sample-repo/auth.js
+  [PASS] Line Boundaries: Lines 5-7 within file bounds (13 lines total)
+  [PASS] Source Freshness: Current disk content matches proposed baseline exactly
+  [PASS] Grammar Support: Supported language (javascript, grammar: javascript)
+  [PASS] AST Syntax: Tree-sitter AST parsed successfully without syntax errors (grammatical validity confirmed; does not prove semantic correctness).
+
+PROPOSED UNIFIED DIFF:
+--- sample-repo/auth.js (original)
++++ sample-repo/auth.js (proposed)
+@@ -5,3 +5,6 @@
+ function verifyToken(token) {
++  if (!token) {
++    throw new Error('Verification failed: Token is missing.');
++  }
+   return jwt.verify(token, SECRET);
+ }
+
+EXPLANATION:
+Added a null check at the beginning of the `verifyToken` function. If the `token` argument is null or undefined, an `Error` is thrown, preventing `jwt.verify` from being called with invalid input and providing a clearer error message.
+
+NOTICE:
+Notice: Syntax validation confirms grammatical validity with Tree-sitter AST, but does not guarantee semantic correctness, runtime behavior, or type safety.
+
+==========================================
+Summary: Proposed change is syntactically valid and ready for review.
+Notice: This was a dry-run. No files on disk were modified.
+==========================================
+```
+
+---
+
+### 8. Isolated Docker Behavioral Verification (Phase 5B)
+
+Propose a code change and run candidate test discovery with isolated Docker sandbox verification:
+
+```powershell
+npx tsx src/index.ts --propose "Trim whitespace and replace backslashes in normalizePath" --file src/utils/walkRepo.ts --symbol normalizePath --verify
+```
+
+#### Prerequisites for Docker Verification
+1. **Docker Desktop for Windows**: Must be installed and running with the Linux container engine (WSL 2 backend). Verification validates and explicitly binds all Docker CLI operations to the local engine named pipe (`-H npipe:////./pipe/dockerDesktopLinuxEngine` or `npipe:////./pipe/docker_engine`), completely bypassing any active or remote Docker context.
+2. **Provisioned Local Image**: The verified verification image must be built locally and provisioned in [`src/verification/imageConfig.ts`](src/verification/imageConfig.ts):
+   - **Image Tag**: `repo-assistant-verifier:local`
+   - **Pinned Digest**: `sha256:6a9bed5b4d4aac85721541f4cd421a49adc57d116a7da7916c1512b244da11ef`
+
+#### Real Passing Verification CLI Output (In Isolated Container)
+When the proposal is within the staging allowlist (`src/`) and candidate tests are discovered, verification executes inside the hardened Docker container:
+
+```text
+==========================================
+Code Change Assistance (Phase 4)
+==========================================
+
+Instruction:
+Trim whitespace and replace backslashes in normalizePath
+Target File Hint: src/utils/walkRepo.ts
+Target Symbol Hint: normalizePath
+
+1. Analyzing repository and identifying target symbol...
+   ✓ Target identified: src/utils/walkRepo.ts :: normalizePath (function, lines 16-18)
+   ✓ Source verified against disk (similarity: 0.7430)
+   ✓ Retrieved 9 reference context chunk(s)
+
+2. Generating proposed replacement with Gemini (gemini-2.5-flash)...
+   ✓ Proposed replacement and unified diff generated.
+
+3. Validating proposed change and verifying Tree-sitter AST syntax...
+
+==================================================
+CHANGE VALIDATION REPORT
+==================================================
+Target: src/utils/walkRepo.ts :: normalizePath (lines 16-18)
+Status: PASSED (Ready for review)
+
+CHECKLIST:
+  [PASS] File Existence: File exists on disk: src/utils/walkRepo.ts
+  [PASS] Line Boundaries: Lines 16-18 within file bounds (93 lines total)
+  [PASS] Source Freshness: Current disk content matches proposed baseline exactly
+  [PASS] Grammar Support: Supported language (typescript, grammar: typescript)
+  [PASS] AST Syntax: Tree-sitter AST parsed successfully without syntax errors (grammatical validity confirmed; does not prove semantic correctness).
+
+PROPOSED UNIFIED DIFF:
+--- src/utils/walkRepo.ts (original)
++++ src/utils/walkRepo.ts (proposed)
+@@ -16,3 +16,3 @@
+ export function normalizePath(filePath: string): string {
+-  return filePath.replace(/\\/g, "/");
++  return filePath.trim().replace(/\\/g, "/");
+ }
+
+EXPLANATION:
+Added `.trim()` to the `filePath` before performing the backslash replacement, ensuring that any leading or trailing whitespace is removed from the path string.
+
+NOTICE:
+Notice: Syntax validation confirms grammatical validity with Tree-sitter AST, but does not guarantee semantic correctness, runtime behavior, or type safety.
+
+==========================================
+Summary: Proposed change is syntactically valid and ready for review.
+Notice: This was a dry-run. No files on disk were modified.
+==========================================
+
+4. Running isolated behavioral verification (Phase 5B)...
+   ✓ Discovered 20 candidate test(s)
+
+==========================================
+Verification Status: PASSED
+==========================================
+Tests: 8 passed, 0 failed, 0 skipped, 0 todo (8 total)
+Cleanup: cleaned
+
+Security Notice: Verification was executed inside a hardened Docker container pinned by verified Image ID. Network was disabled (--network none), root filesystem was read-only, capabilities were dropped, and resource ceilings were enforced. The host repository was not modified.
+
+Notice: Passing candidate tests confirms that existing assertions in the tested suites succeeded against the proposed code. It does NOT guarantee complete functional correctness, absence of regressions in untested paths, or total system security.
+```
+
+#### Real Fail-Closed CLI Output (When Docker Desktop is Stopped)
+When Docker Desktop is offline, the verification runner refuses to run untrusted code on the host system and safely fails closed:
+
+```text
+==========================================
+Verification Status: UNAVAILABLE
+==========================================
+Details: Docker endpoint validation failed: Neither \\.\pipe\dockerDesktopLinuxEngine nor \\.\pipe\docker_engine is accessible. Verification requires a running local Docker Desktop engine.
+Cleanup: not_applicable
+
+Security Notice: Verification was refused because the required local Docker Desktop named pipe, verified image, or permissions were not available. Untrusted test execution on the host was refused.
+
+Notice: Behavioral verification could not be executed or workspace cleanup could not be confirmed. Test pass/fail status is unknown or withheld.
+```
+
+---
+
+### 9. Automated Test Matrix vs. Live End-to-End Demo
+
+To ensure absolute transparency and engineering rigor, the capabilities of Repo Assistant are divided between automated test suite coverage and live end-to-end execution:
+
+| Verification Mode | Scope & Components | Execution Conditions |
+| :--- | :--- | :--- |
+| **Automated Unit & Integration Tests (`npm test`)** | 285 automated tests across 14 suites:<br>• 271 unit tests covering chunking, vector math, RAG prompt construction, Tree-sitter AST parsing, test discovery heuristics, command allowlists, out-of-tree staging, and TAP parsing.<br>• 14 live Docker integration tests covering live container security invariants (`--network none`, `--read-only`, `--cap-drop ALL`, non-root UID 1000, canary mounts, timeout termination, bounded cleanup). | • Unit tests require **zero external dependencies**, no API key, and run in milliseconds.<br>• Docker integration tests run when Docker Desktop Linux engine is active. |
+| **Live Interactive End-to-End Demo** | Live execution across all 5 phases:<br>• Phase 1 & 2: Repository walking, AST symbol chunking, live Gemini embeddings (`npm run embed`), and persistent vector indexing (`npm run index`).<br>• Phase 2C & 2D: Live semantic search (`npm run search`) and token-budgeted RAG context assembly (`npm run retrieve`).<br>• Phase 3B: Grounded question answering with live `gemini-2.5-flash` (`npm run ask`).<br>• Phase 4: Live code change proposal with unified diff and Tree-sitter AST validation (`--propose`).<br>• Phase 5B: Live candidate test discovery and Docker behavioral verification (`--verify`). | Requires active `GEMINI_API_KEY` in environment/.env file, and active Docker Desktop Linux daemon for live container execution. |
+
+---
+
+### 10. Run Full Test Suite
+
+Runs all automated test suites:
+
+```powershell
 npm test
 ```
 
-### 8. Type Check
-```bash
+### 11. Type Check
+
+Verifies TypeScript compilation across the entire codebase without emitting build artifacts:
+
+```powershell
 npx tsc --noEmit
 ```

@@ -5,6 +5,10 @@ import {
   LocalDockerExecutor,
   resolveContainerRunnerExecutable,
   buildVerificationDockerRunArgs,
+  pipePathToDockerHost,
+  DOCKER_HOST_CLI_ARG,
+  DOCKER_DESKTOP_LINUX_PIPE,
+  DOCKER_CLASSIC_ENGINE_PIPE,
   type IDockerExecutor,
   type ContainerRunOptions,
   type ContainerRunResult,
@@ -261,5 +265,121 @@ test("dockerSandbox - Minimal Environment & Mocked Sandbox Supervision Suite", a
     assert.strictEqual(result.exitCode, -1);
     assert.ok(result.stderr.includes("Security policy violation"));
     assert.ok(result.warnings.some((w) => w.includes("unauthorized or workspace-local runner executable")));
+  });
+
+  await t.test("pipePathToDockerHost should canonicalize Windows named pipes and Unix domain sockets", () => {
+    assert.strictEqual(
+      pipePathToDockerHost("\\\\.\\pipe\\dockerDesktopLinuxEngine"),
+      "npipe:////./pipe/dockerDesktopLinuxEngine"
+    );
+    assert.strictEqual(
+      pipePathToDockerHost("//./pipe/dockerDesktopLinuxEngine"),
+      "npipe:////./pipe/dockerDesktopLinuxEngine"
+    );
+    assert.strictEqual(
+      pipePathToDockerHost("\\\\.\\pipe\\docker_engine"),
+      "npipe:////./pipe/docker_engine"
+    );
+    assert.strictEqual(
+      pipePathToDockerHost("/var/run/docker.sock"),
+      "unix:///var/run/docker.sock"
+    );
+    // Already formatted URLs should pass through unchanged
+    assert.strictEqual(
+      pipePathToDockerHost("npipe:////./pipe/dockerDesktopLinuxEngine"),
+      "npipe:////./pipe/dockerDesktopLinuxEngine"
+    );
+    assert.strictEqual(
+      pipePathToDockerHost("unix:///var/run/docker.sock"),
+      "unix:///var/run/docker.sock"
+    );
+  });
+
+  await t.test("buildVerificationDockerRunArgs should pin -H endpoint before run command when hostTarget is provided", () => {
+    const pinnedHost = "npipe:////./pipe/dockerDesktopLinuxEngine";
+    const args = buildVerificationDockerRunArgs(
+      {
+        stagingPath: "C:\\staged\\workspace",
+        imageId: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        command: {
+          runnerId: "tsx-node-test",
+          executable: "tsx",
+          args: ["--test", "tests/foo.test.ts"],
+          targetTestFiles: ["tests/foo.test.ts"],
+        },
+      },
+      "test-container-456",
+      DEFAULT_VERIFICATION_LIMITS,
+      pinnedHost
+    );
+
+    // Assert -H flag is explicitly prepended before "run"
+    assert.strictEqual(args[0], "-H");
+    assert.strictEqual(args[1], pinnedHost);
+    assert.strictEqual(args[2], "run");
+    assert.strictEqual(args[3], "--rm");
+    assert.strictEqual(args[4], "--name");
+    assert.strictEqual(args[5], "test-container-456");
+
+    // Assert unpinned args (without hostTarget) start with "run"
+    const unpinnedArgs = buildVerificationDockerRunArgs(
+      {
+        stagingPath: "C:\\staged\\workspace",
+        imageId: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        command: {
+          runnerId: "tsx-node-test",
+          executable: "tsx",
+          args: ["--test", "tests/foo.test.ts"],
+          targetTestFiles: ["tests/foo.test.ts"],
+        },
+      },
+      "test-container-789",
+      DEFAULT_VERIFICATION_LIMITS
+    );
+    assert.strictEqual(unpinnedArgs[0], "run");
+  });
+
+  await t.test("LocalDockerExecutor should pin explicit host target and fail closed when endpoint is unreachable", async () => {
+    const fakePipe = "\\\\.\\pipe\\repo_assistant_nonexistent_pipe_12345";
+    const executor = new LocalDockerExecutor(fakePipe);
+
+    // Confirm the endpoint was canonicalized in the executor configuration
+    assert.strictEqual(
+      executor.getConfiguredHostTarget(),
+      "npipe:////./pipe/repo_assistant_nonexistent_pipe_12345"
+    );
+    assert.strictEqual(executor.getValidatedHostTarget(), undefined);
+
+    // checkAvailability must fail closed without attempting fallback
+    const availability = await executor.checkAvailability();
+    assert.strictEqual(availability.available, false);
+    assert.strictEqual(executor.getValidatedHostTarget(), undefined);
+    assert.ok(
+      availability.reason?.includes("not accessible"),
+      `Expected 'not accessible' in reason, got: ${availability.reason}`
+    );
+
+    // executeTestRun must fail closed rather than falling back to active context
+    const runResult = await executor.executeTestRun({
+      stagingPath: "C:\\fake\\staging",
+      imageId: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      command: {
+        runnerId: "tsx-node-test",
+        executable: "/node_modules/.bin/tsx",
+        args: ["--test"],
+        targetTestFiles: ["tests/sample.test.ts"],
+      },
+    });
+
+    assert.strictEqual(runResult.exitCode, -1);
+    assert.ok(
+      runResult.stderr.includes("Security policy violation") ||
+        runResult.stderr.includes("unavailable or unvalidated"),
+      `Expected endpoint violation message in stderr, got: ${runResult.stderr}`
+    );
+    assert.ok(
+      runResult.warnings.some((w) => w.includes("unavailable or unvalidated")),
+      "Expected warning regarding unvalidated local endpoint"
+    );
   });
 });

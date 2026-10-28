@@ -161,6 +161,39 @@ test("commandAllowlist - Safe Test Command Construction & Path Validation", asyn
     );
   });
 
+  await t.test("should reject command resolution when only low-confidence tests exist without suitable candidates", () => {
+    const lowConfidenceDiscovery: TestDiscoveryResult = {
+      repoRoot: process.cwd(),
+      targetFile: "src/untested.ts",
+      targetFileExists: true,
+      targetFileReadable: true,
+      hasLikelyTests: false,
+      tests: [
+        {
+          filePath: "tests/unrelated.test.ts",
+          absolutePath: "/repo/tests/unrelated.test.ts",
+          confidence: 0.1,
+          confidenceTier: "low",
+          matchReasons: ["Located in recognized test directory ('tests')"],
+        },
+      ],
+      runnerHints: [],
+      packageTestScripts: {},
+      totalTestFilesScanned: 1,
+      warnings: [],
+    };
+
+    assert.throws(
+      () => resolveApprovedTestCommand(lowConfidenceDiscovery),
+      (err: any) => {
+        return (
+          err instanceof SecurityPolicyError &&
+          err.message.includes("No candidate test files with sufficient confidence")
+        );
+      }
+    );
+  });
+
   await t.test("should accept explicit selectedTestPaths when they match discovered tests", () => {
     const mockDiscovery: TestDiscoveryResult = {
       repoRoot: process.cwd(),

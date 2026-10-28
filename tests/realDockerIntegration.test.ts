@@ -9,6 +9,7 @@ import {
   probeLocalNamedPipe,
   spawnDockerCli,
   DOCKER_NAMED_PIPE_WINDOWS,
+  DOCKER_HOST_CLI_ARG,
 } from "../src/verification/dockerSandbox.js";
 import { parseTapStream, evaluateTapResult } from "../src/verification/tapParser.js";
 
@@ -37,10 +38,19 @@ test("realDockerIntegration - Empirical Docker Desktop Environment Probe & Integ
   await t.test("checkAvailability should report available: true and verify Linux container engine", async () => {
     const availability = await executor.checkAvailability();
     assert.strictEqual(availability.available, true);
+    assert.ok(
+      executor.getValidatedHostTarget()?.startsWith("npipe://") ||
+      executor.getValidatedHostTarget()?.startsWith("unix://"),
+      `Expected pinned host target, got: ${executor.getValidatedHostTarget()}`
+    );
   });
 
   // Check if the local image is present
-  const inspectRes = await spawnDockerCli(["image", "inspect", "--format={{.Id}}", "repo-assistant-verifier:local"]);
+  const inspectRes = await spawnDockerCli(
+    ["image", "inspect", "--format={{.Id}}", "repo-assistant-verifier:local"],
+    5000,
+    DOCKER_HOST_CLI_ARG
+  );
   if (inspectRes.exitCode !== 0) {
     console.log(
       "\n[IMAGE INTEGRATION CHECK: PENDING] Image 'repo-assistant-verifier:local' is not yet built in local Docker daemon.\n"
@@ -62,7 +72,7 @@ test("realDockerIntegration - Empirical Docker Desktop Environment Probe & Integ
     const runViaPath = await spawnDockerCli([
       "run", "--rm", "--network", "none", "--pull", "never",
       localId, "tsx", "/opt/smokeTest.ts",
-    ], 10000);
+    ], 10000, DOCKER_HOST_CLI_ARG);
     assert.strictEqual(runViaPath.exitCode, 0, `Failed to execute tsx via container PATH: ${runViaPath.stderr}`);
     assert.ok(runViaPath.stdout.includes("# pass 3"), "Expected 3 passes via tsx");
 
@@ -70,7 +80,7 @@ test("realDockerIntegration - Empirical Docker Desktop Environment Probe & Integ
     const runViaAbsolute = await spawnDockerCli([
       "run", "--rm", "--network", "none", "--pull", "never",
       localId, "/node_modules/.bin/tsx", "/opt/smokeTest.ts",
-    ], 10000);
+    ], 10000, DOCKER_HOST_CLI_ARG);
     assert.strictEqual(runViaAbsolute.exitCode, 0, `Failed to execute tsx via absolute path: ${runViaAbsolute.stderr}`);
     assert.ok(runViaAbsolute.stdout.includes("# pass 3"), "Expected 3 passes via /node_modules/.bin/tsx");
   });
@@ -148,7 +158,7 @@ test("real container math test", async (t) => {
       "run", "--rm", "--network", "none", "--pull", "never",
       "--read-only",
       localId, "node", "-e", "require('node:fs').writeFileSync('/test_readonly.txt', 'fail');",
-    ]);
+    ], 5000, DOCKER_HOST_CLI_ARG);
     assert.notStrictEqual(res.exitCode, 0, "Writing to root filesystem should fail");
     assert.ok(
       res.stderr.includes("EROFS") || res.stderr.includes("read-only file system"),
@@ -169,7 +179,7 @@ test("real container math test", async (t) => {
           process.exit(2);
         });
       `,
-    ]);
+    ], 5000, DOCKER_HOST_CLI_ARG);
     assert.strictEqual(res.exitCode, 0, `Expected network unreachable inside container, got stderr: ${res.stderr}`);
   });
 
@@ -178,7 +188,7 @@ test("real container math test", async (t) => {
       "run", "--rm", "--network", "none", "--pull", "never",
       "--user", "1000:1000",
       localId, "node", "-e", "console.log(process.getuid() + ':' + process.getgid());",
-    ]);
+    ], 5000, DOCKER_HOST_CLI_ARG);
     assert.strictEqual(res.exitCode, 0);
     assert.strictEqual(res.stdout.trim(), "1000:1000");
   });
@@ -195,7 +205,7 @@ test("real container math test", async (t) => {
         const noNewPrivs = status.match(/^NoNewPrivs:\\s*([0-9]+)/m)?.[1];
         console.log(capEff + ',' + noNewPrivs);
       `,
-    ]);
+    ], 5000, DOCKER_HOST_CLI_ARG);
     assert.strictEqual(res.exitCode, 0);
     const [capEff, noNewPrivs] = res.stdout.trim().split(",");
     assert.strictEqual(capEff, "0000000000000000", `Expected all capabilities dropped, got ${capEff}`);

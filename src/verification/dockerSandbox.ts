@@ -37,6 +37,7 @@ export const DOCKER_DESKTOP_LINUX_PIPE = "\\\\.\\pipe\\dockerDesktopLinuxEngine"
 export const DOCKER_CLASSIC_ENGINE_PIPE = "\\\\.\\pipe\\docker_engine";
 export const DOCKER_NAMED_PIPE_WINDOWS = DOCKER_DESKTOP_LINUX_PIPE;
 export const DOCKER_HOST_CLI_ARG = "npipe:////./pipe/dockerDesktopLinuxEngine";
+export const DOCKER_UNIX_SOCKET = "/var/run/docker.sock";
 
 export const KNOWN_DOCKER_WINDOWS_PIPES = [
   DOCKER_DESKTOP_LINUX_PIPE,
@@ -83,6 +84,34 @@ export function buildMinimalDockerEnv(): NodeJS.ProcessEnv {
     LOCALAPPDATA: process.env.LOCALAPPDATA,
     APPDATA: process.env.APPDATA,
   };
+}
+
+/**
+ * Canonicalizes a local Windows named pipe path or Unix domain socket into a Docker CLI -H endpoint URL.
+ * Bypasses the active Docker context by providing an explicit endpoint target.
+ */
+export function pipePathToDockerHost(pipeOrSocketPath: string): string {
+  if (
+    pipeOrSocketPath.startsWith("npipe://") ||
+    pipeOrSocketPath.startsWith("unix://") ||
+    pipeOrSocketPath.startsWith("tcp://")
+  ) {
+    return pipeOrSocketPath;
+  }
+
+  // Windows named pipe: \\.\pipe\<name> or //./pipe/<name>
+  const normalized = pipeOrSocketPath.replace(/\\/g, "/");
+  if (normalized.startsWith("//./pipe/")) {
+    const pipeName = normalized.slice("//./pipe/".length);
+    return `npipe:////./pipe/${pipeName}`;
+  }
+
+  // Unix domain socket
+  if (normalized.startsWith("/")) {
+    return `unix://${normalized}`;
+  }
+
+  return `npipe:////./pipe/${normalized.replace(/^\/+/, "")}`;
 }
 
 /**
@@ -134,28 +163,52 @@ function probeSingleNamedPipe(pipePath: string, timeoutMs: number = 1000): Promi
   });
 }
 
+export interface LocalDockerEndpointResolution {
+  reachable: boolean;
+  pipePath?: string;
+  hostTarget?: string;
+}
+
+/**
+ * Resolves the active local Docker daemon endpoint by probing local named pipes (Windows)
+ * or Unix sockets (Linux/macOS) in priority order.
+ */
+export async function resolveLocalDockerEndpoint(
+  candidatePipes?: string[]
+): Promise<LocalDockerEndpointResolution> {
+  const candidates =
+    candidatePipes ??
+    (process.platform === "win32"
+      ? KNOWN_DOCKER_WINDOWS_PIPES
+      : [DOCKER_UNIX_SOCKET]);
+
+  for (const candidate of candidates) {
+    const reachable = await probeSingleNamedPipe(candidate);
+    if (reachable) {
+      return {
+        reachable: true,
+        pipePath: candidate,
+        hostTarget: pipePathToDockerHost(candidate),
+      };
+    }
+  }
+
+  return { reachable: false };
+}
+
 /**
  * Probes local Windows Docker named pipes using non-blocking native IPC.
  * Checks candidate Docker Desktop named pipes (e.g. dockerDesktopLinuxEngine, docker_engine).
  */
 export async function probeLocalNamedPipe(pipePath?: string): Promise<boolean> {
-  if (pipePath) {
-    return probeSingleNamedPipe(pipePath);
-  }
-
-  for (const candidate of KNOWN_DOCKER_WINDOWS_PIPES) {
-    const reachable = await probeSingleNamedPipe(candidate);
-    if (reachable) {
-      return true;
-    }
-  }
-
-  return false;
+  const result = await resolveLocalDockerEndpoint(pipePath ? [pipePath] : undefined);
+  return result.reachable;
 }
 
 /**
  * Spawns a docker command using the sanitized environment and an execution timeout.
- * When hostTarget is omitted, Docker CLI uses the active context (e.g. desktop-linux).
+ * When hostTarget is provided, Docker CLI binds explicitly to that endpoint (-H hostTarget),
+ * completely bypassing active Docker contexts.
  */
 export function spawnDockerCli(
   args: string[],
@@ -244,15 +297,17 @@ export function resolveContainerRunnerExecutable(executable: string): string {
 
 /**
  * Builds the hardened, isolated Docker container arguments for verification test execution.
+ * When hostTarget is provided, explicitly binds the Docker CLI to that endpoint (-H hostTarget).
  */
 export function buildVerificationDockerRunArgs(
   options: ContainerRunOptions,
   containerName: string,
-  limits: VerificationLimits
+  limits: VerificationLimits,
+  hostTarget?: string
 ): string[] {
   const resolvedExecutable = resolveContainerRunnerExecutable(options.command.executable);
 
-  return [
+  const runArgs = [
     "run",
     "--rm",
     "--name",
@@ -288,28 +343,101 @@ export function buildVerificationDockerRunArgs(
     resolvedExecutable,
     ...options.command.args,
   ];
+
+  return hostTarget ? ["-H", hostTarget, ...runArgs] : runArgs;
 }
 
 /**
- * Concrete Docker executor interacting with the local Docker Desktop engine on Windows.
+ * Concrete Docker executor interacting with the validated local Docker Desktop engine on Windows.
+ * Enforces pinned local endpoint binding across all operations to avoid reliance on active Docker contexts.
  */
 export class LocalDockerExecutor implements IDockerExecutor {
-  async checkAvailability(): Promise<{ available: boolean; reason?: string }> {
-    // 1. Native named pipe probe
-    const isPipeReachable = await probeLocalNamedPipe();
-    if (!isPipeReachable) {
-      return {
-        available: false,
-        reason: `Docker endpoint validation failed: Neither ${DOCKER_DESKTOP_LINUX_PIPE} nor ${DOCKER_CLASSIC_ENGINE_PIPE} is accessible. Verification requires a running local Docker Desktop engine.`,
-      };
+  private validatedHostTarget?: string;
+  private readonly configuredHostTarget?: string;
+
+  constructor(explicitHostTarget?: string) {
+    if (explicitHostTarget) {
+      this.configuredHostTarget = pipePathToDockerHost(explicitHostTarget);
+    }
+  }
+
+  /**
+   * Returns the explicitly configured Docker host endpoint, if provided.
+   */
+  getConfiguredHostTarget(): string | undefined {
+    return this.configuredHostTarget;
+  }
+
+  /**
+   * Returns the explicitly validated Docker host endpoint currently pinned for this executor.
+   */
+  getValidatedHostTarget(): string | undefined {
+    return this.validatedHostTarget;
+  }
+
+  /**
+   * Ensures that a local Docker endpoint has been probed and validated.
+   * If checkAvailability() was not previously called, resolves and validates the endpoint now.
+   * Fails closed if no local endpoint can be reached or validated.
+   */
+  private async ensureHostTarget(): Promise<string> {
+    if (this.validatedHostTarget) {
+      return this.validatedHostTarget;
     }
 
-    // 2. CLI probe using active context
-    const infoResult = await spawnDockerCli(["info", "--format={{.OSType}}"], 4000);
+    const availability = await this.checkAvailability();
+    if (!availability.available || !this.validatedHostTarget) {
+      throw new Error(
+        `Local Docker endpoint is unavailable or unvalidated. Execution refused. Reason: ${availability.reason || "endpoint unreachable"}`
+      );
+    }
+
+    return this.validatedHostTarget;
+  }
+
+  async checkAvailability(): Promise<{ available: boolean; reason?: string }> {
+    let targetHost: string | undefined = this.configuredHostTarget;
+
+    if (targetHost) {
+      // If explicit host was configured, verify its underlying pipe/socket is reachable
+      if (targetHost.startsWith("npipe:////./pipe/")) {
+        const pipeName = targetHost.replace("npipe:////./pipe/", "");
+        const winPipe = `\\\\.\\pipe\\${pipeName}`;
+        const reachable = await probeSingleNamedPipe(winPipe);
+        if (!reachable) {
+          return {
+            available: false,
+            reason: `Configured Docker named pipe "${winPipe}" is not accessible. Verification requires a running local Docker Desktop engine.`,
+          };
+        }
+      } else if (targetHost.startsWith("unix://")) {
+        const socketPath = targetHost.replace("unix://", "");
+        const reachable = await probeSingleNamedPipe(socketPath);
+        if (!reachable) {
+          return {
+            available: false,
+            reason: `Configured Docker Unix socket "${socketPath}" is not accessible.`,
+          };
+        }
+      }
+    } else {
+      // 1. Native named pipe probe across known local endpoints
+      const resolution = await resolveLocalDockerEndpoint();
+      if (!resolution.reachable || !resolution.hostTarget) {
+        return {
+          available: false,
+          reason: `Docker endpoint validation failed: Neither ${DOCKER_DESKTOP_LINUX_PIPE} nor ${DOCKER_CLASSIC_ENGINE_PIPE} is accessible. Verification requires a running local Docker Desktop engine.`,
+        };
+      }
+      targetHost = resolution.hostTarget;
+    }
+
+    // 2. CLI probe using the explicitly pinned local host endpoint (-H)
+    const infoResult = await spawnDockerCli(["info", "--format={{.OSType}}"], 4000, targetHost);
     if (infoResult.exitCode !== 0) {
       return {
         available: false,
-        reason: `Docker daemon did not respond on local named pipe. Exit code: ${infoResult.exitCode}. Details: ${infoResult.stderr.trim() || infoResult.stdout.trim()}`,
+        reason: `Docker daemon did not respond on validated local endpoint (${targetHost}). Exit code: ${infoResult.exitCode}. Details: ${infoResult.stderr.trim() || infoResult.stdout.trim()}`,
       };
     }
 
@@ -321,6 +449,7 @@ export class LocalDockerExecutor implements IDockerExecutor {
       };
     }
 
+    this.validatedHostTarget = targetHost;
     return { available: true };
   }
 
@@ -332,7 +461,17 @@ export class LocalDockerExecutor implements IDockerExecutor {
       };
     }
 
-    const inspectResult = await spawnDockerCli(["image", "inspect", "--format={{.Id}}", expectedImageId], 4000);
+    let host: string;
+    try {
+      host = await this.ensureHostTarget();
+    } catch (err: any) {
+      return {
+        matches: false,
+        reason: err?.message ?? String(err),
+      };
+    }
+
+    const inspectResult = await spawnDockerCli(["image", "inspect", "--format={{.Id}}", expectedImageId], 4000, host);
     if (inspectResult.exitCode !== 0) {
       return {
         matches: false,
@@ -360,6 +499,16 @@ export class LocalDockerExecutor implements IDockerExecutor {
       };
     }
 
+    let host: string;
+    try {
+      host = await this.ensureHostTarget();
+    } catch (err: any) {
+      return {
+        success: false,
+        reason: err?.message ?? String(err),
+      };
+    }
+
     const canaryArgs = [
       "run",
       "--rm",
@@ -379,7 +528,7 @@ export class LocalDockerExecutor implements IDockerExecutor {
       "touch /workspace/.canary_test && rm /workspace/.canary_test",
     ];
 
-    const result = await spawnDockerCli(canaryArgs, 8000);
+    const result = await spawnDockerCli(canaryArgs, 8000, host);
     if (result.exitCode !== 0) {
       return {
         success: false,
@@ -413,9 +562,42 @@ export class LocalDockerExecutor implements IDockerExecutor {
       };
     }
 
+    try {
+      resolveContainerRunnerExecutable(options.command.executable);
+    } catch (err: any) {
+      return {
+        exitCode: -1,
+        stdout: "",
+        stderr: err?.message ?? String(err),
+        outputTruncated: false,
+        durationMs: 0,
+        timedOut: false,
+        outputLimitExceeded: false,
+        containerStoppedConfirmed: true,
+        warnings: ["Refused container execution with unauthorized or workspace-local runner executable."],
+      };
+    }
+
+    let host: string;
+    try {
+      host = await this.ensureHostTarget();
+    } catch (err: any) {
+      return {
+        exitCode: -1,
+        stdout: "",
+        stderr: `Security policy violation: ${err?.message ?? String(err)}`,
+        outputTruncated: false,
+        durationMs: 0,
+        timedOut: false,
+        outputLimitExceeded: false,
+        containerStoppedConfirmed: true,
+        warnings: ["Refused container execution: local Docker endpoint is unavailable or unvalidated."],
+      };
+    }
+
     let dockerRunArgs: string[];
     try {
-      dockerRunArgs = buildVerificationDockerRunArgs(options, containerName, limits);
+      dockerRunArgs = buildVerificationDockerRunArgs(options, containerName, limits, host);
     } catch (err: any) {
       return {
         exitCode: -1,
@@ -478,8 +660,8 @@ export class LocalDockerExecutor implements IDockerExecutor {
         outputLimitExceeded = true;
       }
 
-      // 1. Issue docker kill with hard 5000ms timeout
-      const killResult = await spawnDockerCli(["kill", containerName], 5000);
+      // 1. Issue docker kill with hard 5000ms timeout on validated local host
+      const killResult = await spawnDockerCli(["kill", containerName], 5000, host);
 
       // Check if container was already stopped or successfully killed
       const alreadyStopped =
@@ -488,8 +670,8 @@ export class LocalDockerExecutor implements IDockerExecutor {
         killResult.stderr.toLowerCase().includes("no such container");
 
       if (!alreadyStopped) {
-        // Attempt forced remove with 5000ms timeout
-        const rmResult = await spawnDockerCli(["rm", "-f", containerName], 5000);
+        // Attempt forced remove with 5000ms timeout on validated local host
+        const rmResult = await spawnDockerCli(["rm", "-f", containerName], 5000, host);
         const rmSuccess =
           rmResult.exitCode === 0 ||
           rmResult.stderr.toLowerCase().includes("no such container");

@@ -206,7 +206,17 @@ export function validateAndResolveTargetPath(
     );
   }
 
-  // 3. Segment-by-segment lstat inspection from canonicalRoot to target
+  // 3. Allowlist membership (Policy Check before filesystem inspection)
+  const matchesAllowlist = allowlistPatterns.some((pattern) =>
+    matchStagingPattern(normalized, pattern)
+  );
+  if (!matchesAllowlist) {
+    throw new SecurityPolicyError(
+      `Target file "${normalized}" is not within the permitted staging allowlist.`
+    );
+  }
+
+  // 4. Segment-by-segment lstat inspection from canonicalRoot to target
   const segments = rel.split(path.sep);
   let currentPath = canonicalRoot;
 
@@ -246,16 +256,6 @@ export function validateAndResolveTargetPath(
         );
       }
     }
-  }
-
-  // 4. Allowlist membership
-  const matchesAllowlist = allowlistPatterns.some((pattern) =>
-    matchStagingPattern(normalized, pattern)
-  );
-  if (!matchesAllowlist) {
-    throw new SecurityPolicyError(
-      `Target file "${normalized}" is not within the permitted staging allowlist.`
-    );
   }
 
   return resolvedTarget;
