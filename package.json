@@ -32,6 +32,7 @@
   },
   "dependencies": {
     "@google/genai": "^2.27.0",
+    "@lancedb/lancedb": "^0.41.0",
     "tree-sitter-wasms": "^0.1.13",
     "web-tree-sitter": "^0.24.6"
   }

@@ -67,10 +67,12 @@ src/embeddings.ts        ──► Gemini embedding generation (gemini-embedding
        │                     └── Query embedding in unified vector space
        │
        ▼
-src/vectorStore.ts       ──► Local JSON Vector Store (.data/vector-store.json)
-       │                     ├── Persistence (saveToFile / loadFromFile)
-       │                     ├── Cosine Similarity: dot(A, B) / (||A|| * ||B||)
-       │                     └── Top-K Semantic Search
+src/vectorStore.ts       ──► LanceDB Vector Database (.data/lancedb) + JSON Fallback (.data/vector-store.json)
+       │                     ├── Shared IVectorStore abstraction & pluggable strategy pattern
+       │                     ├── Dedicated LanceDB local columnar table (code_chunks.lance)
+       │                     ├── Native Cosine Distance search with score normalization: 1.0 - distance
+       │                     ├── Strict dimension validation & zero-API auto-migration
+       │                     └── Full in-memory JSON fallback for offline / mock testing
        │
        ▼
 src/retrieval.ts         ──► Retrieval & Context Preparation
@@ -144,30 +146,85 @@ Because the embedding provider and model changed to Gemini (`gemini-embedding-00
 
 ---
 
-## Phase 2C: Vector Storage & Semantic Search
+## Phase 2C: Dedicated Vector Database (LanceDB) & Semantic Search
 
-### What is a Vector Store?
-A **vector store** is a database designed to store vector records (arrays of floating-point numbers) alongside their source metadata. In this phase, we use a clean, local JSON-based index (`.data/vector-store.json`) that can be loaded, queried, and persisted without needing external infrastructure.
+### Why LanceDB Was Chosen
+To satisfy faculty review requirements for an industrial-grade vector database while preserving standalone local execution without cloud dependencies or background daemon infrastructure, **LanceDB** was selected as the primary vector storage and indexing engine:
+1. **Embedded & In-Process:** Like SQLite for relational data, LanceDB operates directly inside the Node.js process. It requires no external server, daemon, Docker container, or open network port.
+2. **Columnar Disk-Backed Storage:** Uses the open-source Lance columnar data format built on Apache Arrow, paging only vector indices and requested metadata columns into RAM rather than deserializing entire datasets into heap memory.
+3. **Native Cosine Distance Search:** Provides high-throughput SIMD-accelerated vector search across high-dimensional embeddings (3,072 dimensions for Gemini `gemini-embedding-001`).
+4. **Zero-Setup Portability:** Bundles precompiled native binaries across major platforms (including Windows x64 via N-API) without requiring local C++ toolchains.
 
-### What is Cosine Similarity?
-**Cosine similarity** measures the cosine of the angle between two multi-dimensional vectors:
+### Architecture and Data Flow
 
-$$\text{similarity}(A, B) = \frac{A \cdot B}{\|A\| \times \|B\|} = \frac{\sum A_i B_i}{\sqrt{\sum A_i^2} \sqrt{\sum B_i^2}}$$
+```text
+Repository Files (.js, .jsx, .ts, .tsx)
+       │
+       ▼
+Tree-sitter AST & Chunk Extraction (src/codeChunks.ts)
+       │
+       ▼
+Gemini Embeddings: gemini-embedding-001 (src/embeddings.ts)
+       │
+       ▼
+IVectorStore Shared Abstraction (src/vectorStore.ts)
+       ├──► Primary: LanceDbVectorStore
+       │      ├── Local directory: .data/lancedb/
+       │      ├── Persistent columnar table: code_chunks.lance
+       │      ├── Metric: Cosine Distance
+       │      └── Score conversion: similarity = max(-1, min(1, 1.0 - distance))
+       │
+       └──► Fallback: VectorStore (JSON)
+              ├── Local file: .data/vector-store.json
+              └── Fully synchronous in-memory exact flat scan for offline/mock testing
+```
 
-- A score of `1.0` means the vectors point in the identical semantic direction (perfect match).
-- A score of `0.0` means the vectors are orthogonal (unrelated concepts).
-- A score near `-1.0` means the vectors represent diametrically opposed concepts.
+### Installation and Dependencies
+LanceDB is installed via `@lancedb/lancedb`:
+```bash
+npm install
+```
 
 ### How Indexing Works (`npm run index`)
-1. Analyzes the target codebase and creates semantic code chunks.
-2. Batches chunks and calls the Gemini embedding API (`gemini-embedding-001`) to produce embedding vectors.
-3. Associates each chunk with its vector and writes the index to `.data/vector-store.json`.
+1. Analyzes the target codebase (`sample-repo` or specified folder) and creates semantic code chunks.
+2. Batches chunks and calls the Gemini embedding API (`gemini-embedding-001`) to generate 3,072-dimensional embedding vectors.
+3. **Primary Storage:** Persists chunk records and vectors directly to the LanceDB table at `.data/lancedb/code_chunks.lance`.
+4. **Fallback Sync:** Simultaneously writes `.data/vector-store.json` so that both engines stay synchronized.
 
 ### How Semantic Search Works (`npm run search`)
-1. Loads the stored vectors from `.data/vector-store.json`.
-2. Generates an embedding for the user's natural-language query using Gemini API.
-3. Computes the cosine similarity between the query vector and every stored code chunk vector.
-4. Ranks the chunks from highest similarity to lowest and returns the Top-K results.
+1. Resolves the active database backend (defaults to LanceDB).
+2. Generates an embedding for the user's natural-language query using the Gemini API.
+3. Queries LanceDB with `.vectorSearch(queryEmbedding).distanceType('cosine').limit(topK)`.
+4. **Metric Normalization:** Converts LanceDB's internal cosine distance $d \in [0, 2]$ into the standard cosine similarity score $s \in [-1, 1]$ expected by the application:
+   $$s = \max(-1, \min(1, 1.0 - d))$$
+5. Reconstructs structured `CodeChunk` objects and returns the ranked `SearchResult[]`.
+
+### Switching Backends and Fallback Behavior
+- **Default (LanceDB):** Commands automatically query LanceDB at `.data/lancedb/`.
+- **JSON Fallback Flag:** To explicitly query the JSON store, pass `--backend json` or set `VECTOR_STORE_BACKEND=json`:
+  ```bash
+  npm run search -- "Where is authentication handled?" --backend json
+  ```
+- **Zero-API Auto-Migration:** If `.data/lancedb` is missing but `.data/vector-store.json` is present, the engine automatically imports all records and 3,072D embeddings into LanceDB without re-calling the Gemini API.
+
+### Resetting and Rebuilding the Vector Database
+- To completely reset vector data, remove the `.data/` directory:
+  ```bash
+  # PowerShell (Windows)
+  Remove-Item -Recurse -Force .data/lancedb, .data/vector-store.json
+
+  # Bash / Linux / macOS
+  rm -rf .data/lancedb .data/vector-store.json
+  ```
+- Rebuild the index at any time:
+  ```bash
+  npm run index
+  ```
+
+### Limitations and Migration Considerations
+1. **Fixed Vector Dimension per Table:** LanceDB tables enforce a strict schema dimension (3,072 for Gemini). If switching embedding models, rebuild the table using `npm run index`.
+2. **Database File Exclusion:** Database files reside in `.data/`, which is ignored by `.gitignore` and `src/utils/walkRepo.ts` to ensure database files are never crawled as source files.
+3. **Test Isolation:** Production uses 3,072D embeddings; unit tests continue to use 3D mock vectors via isolated test tables or `VectorStore`, preserving sub-second test execution.
 
 ---
 

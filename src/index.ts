@@ -5,6 +5,9 @@ import {
   indexRepository,
   searchCode,
   DEFAULT_VECTOR_STORE_PATH,
+  DEFAULT_LANCEDB_DIR,
+  DEFAULT_LANCEDB_TABLE,
+  hasVectorIndexAvailable,
 } from "./vectorStore.js";
 import { retrieveRelevantCode, buildContext } from "./retrieval.js";
 import { retrieveAndAnswer } from "./answer.js";
@@ -33,28 +36,85 @@ try {
   // Ignore if .env does not exist
 }
 
+export type VectorBackend = "lancedb" | "json";
+
+export interface ParsedCliArgs {
+  command?: "search" | "retrieve" | "ask" | "propose" | "index" | "embed" | undefined;
+  query?: string | undefined;
+  question?: string | undefined;
+  instruction?: string | undefined;
+  targetDir?: string | undefined;
+  targetFile?: string | undefined;
+  targetSymbol?: string | undefined;
+  verify?: boolean | undefined;
+  backend: VectorBackend;
+  error?: string | undefined;
+  rawPositional: string[];
+}
+
 export interface ParsedProposeArgs {
   instruction: string;
   targetFile?: string | undefined;
   targetSymbol?: string | undefined;
   verify?: boolean | undefined;
+  backend?: VectorBackend | undefined;
   error?: string | undefined;
 }
 
 /**
- * Parses CLI arguments for the --propose command.
- * Correctly extracts instruction, --file, and --symbol hints without leaking flag values into the instruction.
+ * Robust CLI argument parser supporting all assistant commands and options.
+ * Handles:
+ *  - Commands: --search, --retrieve, --ask, --propose, --index, --embed
+ *  - Flags: --verify, --file <path>, --symbol <name>
+ *  - Backend flag: --backend <lancedb|json>, --backend=<lancedb|json>
+ *  - PowerShell npm heuristic: When running via `npm run <cmd> -- ...`, PowerShell strips `--`
+ *    and npm sets `env.npm_config_backend`, passing the backend value as a raw positional argument.
+ *  - Strict validation of backend names and missing flag values.
+ *  - Preserves ordinary query strings containing "json" or "lancedb" when --backend was not passed.
  */
-export function parseProposeArgs(args: string[]): ParsedProposeArgs {
+export function parseCliArgs(
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env
+): ParsedCliArgs {
+  let command: "search" | "retrieve" | "ask" | "propose" | "index" | "embed" | undefined;
   let targetFile: string | undefined;
   let targetSymbol: string | undefined;
   let verify = false;
-  const instructionTokens: string[] = [];
+  let backendExplicitlySet = false;
+  let backend: VectorBackend = "lancedb";
+
+  // Check if VECTOR_STORE_BACKEND is configured in env
+  if (env.VECTOR_STORE_BACKEND === "json" || env.VECTOR_STORE_BACKEND === "lancedb") {
+    backend = env.VECTOR_STORE_BACKEND;
+  }
+
+  const positionalTokens: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
 
+    if (arg === "--search") {
+      command = "search";
+      continue;
+    }
+    if (arg === "--retrieve") {
+      command = "retrieve";
+      continue;
+    }
+    if (arg === "--ask") {
+      command = "ask";
+      continue;
+    }
     if (arg === "--propose") {
+      command = "propose";
+      continue;
+    }
+    if (arg === "--index") {
+      command = "index";
+      continue;
+    }
+    if (arg === "--embed") {
+      command = "embed";
       continue;
     }
 
@@ -67,7 +127,9 @@ export function parseProposeArgs(args: string[]): ParsedProposeArgs {
       const next = args[i + 1];
       if (!next || next.startsWith("--")) {
         return {
-          instruction: "",
+          command,
+          backend,
+          rawPositional: [],
           error: "Missing value for --file flag. Expected a file path.",
         };
       }
@@ -80,7 +142,9 @@ export function parseProposeArgs(args: string[]): ParsedProposeArgs {
       const next = args[i + 1];
       if (!next || next.startsWith("--")) {
         return {
-          instruction: "",
+          command,
+          backend,
+          rawPositional: [],
           error: "Missing value for --symbol flag. Expected a symbol name.",
         };
       }
@@ -89,19 +153,225 @@ export function parseProposeArgs(args: string[]): ParsedProposeArgs {
       continue;
     }
 
+    if (arg === "--backend") {
+      const next = args[i + 1];
+      if (!next || next.startsWith("--")) {
+        return {
+          command,
+          backend,
+          rawPositional: [],
+          error: "Missing value for --backend flag. Expected 'lancedb' or 'json'.",
+        };
+      }
+      if (next !== "lancedb" && next !== "json") {
+        return {
+          command,
+          backend,
+          rawPositional: [],
+          error: `Invalid backend '${next}'. Supported backends are 'lancedb' and 'json'.`,
+        };
+      }
+      backend = next;
+      backendExplicitlySet = true;
+      i++;
+      continue;
+    }
+
+    if (arg.startsWith("--backend=")) {
+      const val = arg.slice("--backend=".length).trim();
+      if (!val) {
+        return {
+          command,
+          backend,
+          rawPositional: [],
+          error: "Missing value for --backend flag. Expected 'lancedb' or 'json'.",
+        };
+      }
+      if (val !== "lancedb" && val !== "json") {
+        return {
+          command,
+          backend,
+          rawPositional: [],
+          error: `Invalid backend '${val}'. Supported backends are 'lancedb' and 'json'.`,
+        };
+      }
+      backend = val;
+      backendExplicitlySet = true;
+      continue;
+    }
+
     if (arg.startsWith("--")) {
       continue;
     }
 
-    instructionTokens.push(arg);
+    positionalTokens.push(arg);
   }
 
-  const instruction = instructionTokens.join(" ").trim();
+  // Handle PowerShell / npm config heuristic for --file
+  if (!targetFile && env.npm_config_file !== undefined) {
+    if (env.npm_config_file !== "true" && env.npm_config_file !== "false") {
+      targetFile = env.npm_config_file;
+    } else if (env.npm_config_file === "true") {
+      const fileIdx = positionalTokens.findIndex(
+        (tok) => tok.includes("/") || tok.includes("\\") || /\.[a-z0-9]+$/i.test(tok)
+      );
+      if (fileIdx !== -1) {
+        targetFile = positionalTokens[fileIdx];
+        positionalTokens.splice(fileIdx, 1);
+      }
+    }
+  }
+
+  // Handle PowerShell / npm config heuristic for --symbol
+  if (!targetSymbol && env.npm_config_symbol !== undefined) {
+    if (env.npm_config_symbol !== "true" && env.npm_config_symbol !== "false") {
+      targetSymbol = env.npm_config_symbol;
+    } else if (env.npm_config_symbol === "true") {
+      const symbolIdx = positionalTokens.findIndex(
+        (tok) => /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(tok) && tok !== positionalTokens[0]
+      );
+      if (symbolIdx !== -1) {
+        targetSymbol = positionalTokens[symbolIdx];
+        positionalTokens.splice(symbolIdx, 1);
+      }
+    }
+  }
+
+  // Handle PowerShell / npm config heuristic when --backend was stripped by npm
+  if (!backendExplicitlySet && env.npm_config_backend !== undefined) {
+    const npmBackend = env.npm_config_backend;
+
+    if (npmBackend === "json" || npmBackend === "lancedb") {
+      backend = npmBackend;
+      backendExplicitlySet = true;
+    } else if (npmBackend === "true") {
+      // npm stripped `--backend`, and the value was passed as a positional token
+      let candidateIndex = -1;
+
+      // Check if any token matches a valid backend name
+      // Prioritize checking end then start (standard flag positions)
+      if (
+        positionalTokens.length > 0 &&
+        (positionalTokens[positionalTokens.length - 1] === "json" ||
+          positionalTokens[positionalTokens.length - 1] === "lancedb")
+      ) {
+        candidateIndex = positionalTokens.length - 1;
+      } else if (
+        positionalTokens.length > 0 &&
+        (positionalTokens[0] === "json" || positionalTokens[0] === "lancedb")
+      ) {
+        candidateIndex = 0;
+      } else {
+        candidateIndex = positionalTokens.findIndex((tok) => tok === "json" || tok === "lancedb");
+      }
+
+      if (candidateIndex !== -1) {
+        backend = positionalTokens[candidateIndex] as VectorBackend;
+        backendExplicitlySet = true;
+        positionalTokens.splice(candidateIndex, 1);
+      } else {
+        // No valid backend token was found. Determine if value was missing or invalid.
+        if (positionalTokens.length === 0) {
+          return {
+            command,
+            backend,
+            rawPositional: [],
+            error: "Missing value for --backend flag. Expected 'lancedb' or 'json'.",
+          };
+        }
+
+        let candidate: string | undefined;
+        if (positionalTokens.length >= 2) {
+          // Extra positional argument was passed as the backend flag value
+          if (
+            positionalTokens[positionalTokens.length - 1] &&
+            !positionalTokens[positionalTokens.length - 1]!.includes(" ")
+          ) {
+            candidate = positionalTokens[positionalTokens.length - 1];
+          } else if (positionalTokens[0] && !positionalTokens[0]!.includes(" ")) {
+            candidate = positionalTokens[0];
+          } else {
+            candidate = positionalTokens[positionalTokens.length - 1];
+          }
+        } else if (positionalTokens.length === 1) {
+          // Single token: if it has whitespace, it's the user's query and --backend had no value
+          if (positionalTokens[0]!.includes(" ")) {
+            return {
+              command,
+              backend,
+              rawPositional: positionalTokens,
+              error: "Missing value for --backend flag. Expected 'lancedb' or 'json'.",
+            };
+          } else {
+            candidate = positionalTokens[0];
+          }
+        }
+
+        if (candidate) {
+          return {
+            command,
+            backend,
+            rawPositional: positionalTokens,
+            error: `Invalid backend '${candidate}'. Supported backends are 'lancedb' and 'json'.`,
+          };
+        } else {
+          return {
+            command,
+            backend,
+            rawPositional: positionalTokens,
+            error: "Missing value for --backend flag. Expected 'lancedb' or 'json'.",
+          };
+        }
+      }
+    } else {
+      // npm_config_backend was set to an invalid value (e.g. from --backend=invalid)
+      return {
+        command,
+        backend,
+        rawPositional: positionalTokens,
+        error: `Invalid backend '${npmBackend}'. Supported backends are 'lancedb' and 'json'.`,
+      };
+    }
+  }
+
+  const queryOrInstruction = positionalTokens.join(" ").trim();
+  const targetDir = positionalTokens[0] || "sample-repo";
+
   return {
-    instruction,
+    command,
+    query: queryOrInstruction,
+    question: queryOrInstruction,
+    instruction: queryOrInstruction,
+    targetDir,
     targetFile,
     targetSymbol,
     verify,
+    backend,
+    rawPositional: positionalTokens,
+  };
+}
+
+/**
+ * Parses CLI arguments for the --propose command.
+ * Preserves backwards compatibility with existing tests and callers.
+ */
+export function parseProposeArgs(
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env
+): ParsedProposeArgs {
+  const parsed = parseCliArgs(args, env);
+  if (parsed.error) {
+    return {
+      instruction: "",
+      error: parsed.error,
+    };
+  }
+  return {
+    instruction: parsed.instruction ?? "",
+    targetFile: parsed.targetFile,
+    targetSymbol: parsed.targetSymbol,
+    verify: parsed.verify,
+    backend: parsed.backend,
   };
 }
 
@@ -114,29 +384,48 @@ function printGeminiApiKeyInstructions(command: string) {
   console.log(`  2. Run: npm run ${command}\n`);
 }
 
-async function main() {
-  const isEmbedMode = process.argv.includes("--embed");
-  const isIndexMode = process.argv.includes("--index");
-  const isSearchMode = process.argv.includes("--search");
-  const isRetrieveMode = process.argv.includes("--retrieve");
-  const isAskMode = process.argv.includes("--ask");
-  const isProposeMode = process.argv.includes("--propose");
+function checkVectorStoreAvailable(backend?: VectorBackend): boolean {
+  if (!hasVectorIndexAvailable({ backend })) {
+    if (backend === "json") {
+      console.log(`\nVector store not found in fallback (${DEFAULT_VECTOR_STORE_PATH}).`);
+    } else {
+      console.log(
+        `\nVector store not found in LanceDB (${DEFAULT_LANCEDB_DIR}) or fallback (${DEFAULT_VECTOR_STORE_PATH}).`
+      );
+    }
+    console.log("Please build the repository vector index first:\n  npm run index\n");
+    return false;
+  }
+  return true;
+}
 
-  // Filter out CLI option flags to obtain positional arguments
-  const positionalArgs = process.argv.slice(2).filter((arg) => !arg.startsWith("--"));
+async function main() {
+  const parsed = parseCliArgs(process.argv.slice(2));
+
+  if (parsed.error) {
+    console.log(`\nError: ${parsed.error}`);
+    if (parsed.command === "propose" || process.argv.includes("--propose")) {
+      console.log('Example: npm run propose -- "Add validation to verifyToken" --file sample-repo/auth.js --symbol verifyToken\n');
+    } else {
+      console.log();
+    }
+    return;
+  }
+
+  process.env.VECTOR_STORE_BACKEND = parsed.backend;
+
+  const isEmbedMode = parsed.command === "embed" || process.argv.includes("--embed");
+  const isIndexMode = parsed.command === "index" || process.argv.includes("--index");
+  const isSearchMode = parsed.command === "search" || process.argv.includes("--search");
+  const isRetrieveMode = parsed.command === "retrieve" || process.argv.includes("--retrieve");
+  const isAskMode = parsed.command === "ask" || process.argv.includes("--ask");
+  const isProposeMode = parsed.command === "propose" || process.argv.includes("--propose");
 
   // 1. Code Change Assistance Mode (Phase 4)
   if (isProposeMode) {
     console.log("==========================================");
     console.log("Code Change Assistance (Phase 4)");
     console.log("==========================================");
-
-    const parsed = parseProposeArgs(process.argv.slice(2));
-    if (parsed.error) {
-      console.log(`\nError: ${parsed.error}`);
-      console.log('Example: npm run propose -- "Add validation to verifyToken" --file sample-repo/auth.js --symbol verifyToken\n');
-      return;
-    }
 
     if (!parsed.instruction) {
       console.log("\nPlease provide a change instruction.");
@@ -147,9 +436,7 @@ async function main() {
       return;
     }
 
-    if (!fs.existsSync(DEFAULT_VECTOR_STORE_PATH)) {
-      console.log(`\nVector store not found at ${DEFAULT_VECTOR_STORE_PATH}.`);
-      console.log("Please build the repository vector index first:\n  npm run index\n");
+    if (!checkVectorStoreAvailable(parsed.backend)) {
       return;
     }
 
@@ -323,16 +610,14 @@ async function main() {
     console.log("RAG Answer Generation (Phase 3B)");
     console.log("==========================================");
 
-    const question = positionalArgs.join(" ").trim();
+    const question = parsed.question;
     if (!question) {
       console.log("\nPlease provide a question to ask.");
       console.log('Example: npm run ask -- "Where is authentication handled?"\n');
       return;
     }
 
-    if (!fs.existsSync(DEFAULT_VECTOR_STORE_PATH)) {
-      console.log(`\nVector store not found at ${DEFAULT_VECTOR_STORE_PATH}.`);
-      console.log("Please build the repository vector index first:\n  npm run index\n");
+    if (!checkVectorStoreAvailable(parsed.backend)) {
       return;
     }
 
@@ -349,6 +634,7 @@ async function main() {
     const geminiClient = new GeminiClient();
     const result = await retrieveAndAnswer(question, {
       llmClient: geminiClient,
+      retrieveOptions: { backend: parsed.backend },
     });
 
     console.log("==========================================");
@@ -365,16 +651,14 @@ async function main() {
     console.log("Code Retrieval (Phase 2D)");
     console.log("==========================================");
 
-    const query = positionalArgs.join(" ").trim();
+    const query = parsed.query;
     if (!query) {
       console.log("\nPlease provide a retrieval query.");
       console.log('Example: npm run retrieve -- "Where is authentication handled?"\n');
       return;
     }
 
-    if (!fs.existsSync(DEFAULT_VECTOR_STORE_PATH)) {
-      console.log(`\nVector store not found at ${DEFAULT_VECTOR_STORE_PATH}.`);
-      console.log("Please build the repository vector index first:\n  npm run index\n");
+    if (!checkVectorStoreAvailable(parsed.backend)) {
       return;
     }
 
@@ -387,7 +671,7 @@ async function main() {
     console.log("\nQuery:");
     console.log(query);
 
-    const retrieval = await retrieveRelevantCode(query);
+    const retrieval = await retrieveRelevantCode(query, { backend: parsed.backend });
     const contextResult = buildContext(retrieval.results);
 
     console.log("\nRetrieved chunks:\n");
@@ -420,16 +704,14 @@ async function main() {
     console.log("Semantic Search (Phase 2C)");
     console.log("==========================================");
 
-    const query = positionalArgs.join(" ").trim();
+    const query = parsed.query;
     if (!query) {
       console.log("\nPlease provide a search query.");
       console.log('Example: npm run search -- "Where is authentication handled?"\n');
       return;
     }
 
-    if (!fs.existsSync(DEFAULT_VECTOR_STORE_PATH)) {
-      console.log(`\nVector store not found at ${DEFAULT_VECTOR_STORE_PATH}.`);
-      console.log("Please build the repository vector index first:\n  npm run index\n");
+    if (!checkVectorStoreAvailable(parsed.backend)) {
       return;
     }
 
@@ -440,7 +722,7 @@ async function main() {
     }
 
     console.log(`\nQuery: ${query}\n`);
-    const results = await searchCode(query, 5);
+    const results = await searchCode(query, 5, { backend: parsed.backend });
 
     if (results.length === 0) {
       console.log("No relevant code chunks found.");
@@ -464,10 +746,10 @@ async function main() {
   // 4. Indexing Mode (Phase 2C)
   if (isIndexMode) {
     console.log("==========================================");
-    console.log("Repository Indexing Pipeline (Phase 2C)");
+    console.log("Repository Indexing Pipeline (LanceDB Vector DB)");
     console.log("==========================================");
 
-    const targetDir = positionalArgs[0] || "sample-repo";
+    const targetDir = parsed.targetDir || "sample-repo";
     const geminiKey = process.env.GEMINI_API_KEY;
 
     if (!geminiKey || geminiKey.trim() === "") {
@@ -476,16 +758,18 @@ async function main() {
     }
 
     console.log(`Indexing repository "${targetDir}" using Gemini (${DEFAULT_EMBEDDING_MODEL})...`);
-    const store = await indexRepository(targetDir, DEFAULT_VECTOR_STORE_PATH);
-    console.log(`Successfully indexed ${store.size()} code chunk(s).`);
-    console.log(`Vector store saved to: ${DEFAULT_VECTOR_STORE_PATH}`);
+    const store = await indexRepository(targetDir, DEFAULT_VECTOR_STORE_PATH, { backend: parsed.backend });
+    const count = await store.size();
+    console.log(`Successfully indexed ${count} code chunk(s).`);
+    console.log(`Vector database saved to: ${DEFAULT_LANCEDB_DIR} (table: ${DEFAULT_LANCEDB_TABLE})`);
+    console.log(`Fallback JSON store saved to: ${DEFAULT_VECTOR_STORE_PATH}`);
     console.log("\nYou can now query the index:");
     console.log('  npm run search -- "Where is authentication handled?"\n');
     return;
   }
 
   // Default / Embed Mode: build and display chunks
-  const targetDir = positionalArgs[0] || "sample-repo";
+  const targetDir = parsed.targetDir || "sample-repo";
   const chunks = await buildRepoChunks(targetDir);
 
   console.log(`Generated ${chunks.length} code chunk(s) for "${targetDir}":\n`);
@@ -533,7 +817,14 @@ async function main() {
   }
 }
 
-main().catch((err: unknown) => {
-  console.error("Execution failed:", err);
-  process.exit(1);
-});
+const isDirectExecution =
+  Boolean(process.argv[1]) &&
+  (process.argv[1]!.endsWith("index.ts") ||
+    process.argv[1]!.endsWith("index.js"));
+
+if (isDirectExecution && !process.argv.includes("--test")) {
+  main().catch((err: unknown) => {
+    console.error("Execution failed:", err);
+    process.exit(1);
+  });
+}

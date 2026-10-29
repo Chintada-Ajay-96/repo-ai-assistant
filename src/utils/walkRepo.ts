@@ -9,7 +9,7 @@ export interface FileLanguageInfo {
   grammar: GrammarType;
 }
 
-export const IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "build"]);
+export const IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "build", ".data"]);
 
 export const SUPPORTED_EXTENSIONS = new Set([".js", ".jsx", ".ts", ".tsx"]);
 

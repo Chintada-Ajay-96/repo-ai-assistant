@@ -9,7 +9,11 @@ import {
   VectorStore,
   getChunkId,
   DEFAULT_VECTOR_STORE_PATH,
+  DEFAULT_LANCEDB_DIR,
+  DEFAULT_LANCEDB_TABLE,
   type SearchResult,
+  type IVectorStore,
+  getActiveVectorStore,
 } from "./vectorStore.js";
 
 export const DEFAULT_TOP_K = 5;
@@ -47,7 +51,10 @@ export interface ContextResult {
 export interface RetrieveOptions {
   topK?: number;
   storePath?: string;
-  store?: VectorStore;
+  store?: IVectorStore;
+  backend?: "lancedb" | "json";
+  lanceDbDir?: string;
+  tableName?: string;
   embeddingOptions?: GenerateEmbeddingsOptions;
   client?: EmbeddingClient;
   apiKey?: string;
@@ -185,12 +192,12 @@ export async function retrieveRelevantCode(
 
   let store = options?.store;
   if (!store) {
-    const storePath = options?.storePath ?? DEFAULT_VECTOR_STORE_PATH;
-    if (!fs.existsSync(storePath)) {
-      throw new Error(`Vector store file not found at: ${storePath}. Please build the repository index first.`);
-    }
-    store = new VectorStore();
-    await store.loadFromFile(storePath);
+    store = await getActiveVectorStore({
+      backend: options?.backend,
+      jsonPath: options?.storePath,
+      lanceDbDir: options?.lanceDbDir,
+      tableName: options?.tableName,
+    });
   }
 
   // Reuse existing Phase 2B embedding options and abstraction
@@ -211,7 +218,7 @@ export async function retrieveRelevantCode(
   }
 
   const queryEmbedding = await generateQueryEmbedding(query, embeddingOpts);
-  const searchResults: SearchResult[] = store.search(queryEmbedding, topK);
+  const searchResults: SearchResult[] = await store.search(queryEmbedding, topK);
 
   return {
     query: query.trim(),
